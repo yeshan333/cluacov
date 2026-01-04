@@ -14,6 +14,8 @@
 #include "lua53/lobject.h"
 #elif LUA_VERSION_NUM == 504
 #include "lua54/lobject.h"
+#elif LUA_VERSION_NUM == 505
+#include "lua55/lobject.h"
 #else
 #error unsupported Lua version
 #endif
@@ -36,7 +38,7 @@ static Proto *get_proto(lua_State *L) {
     return ((Closure *) lua_topointer(L, 1))->l.p;
 }
 
-#if LUA_VERSION_NUM == 504
+#if LUA_VERSION_NUM >= 504
 
 /*
 ** mark for entries in 'lineinfo' array that has absolute information in
