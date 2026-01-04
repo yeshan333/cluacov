@@ -5,6 +5,8 @@ environment:
   - LUA: "lua=5.1"
   - LUA: "lua=5.2"
   - LUA: "lua=5.3"
+  - LUA: "lua=5.4"
+  - LUA: "lua=5.5"
   - LUA: "luajit=2.0"
   - LUA: "luajit=2.1"
 
@@ -15,12 +17,13 @@ configuration:
 
 install:
   - set PATH=C:\Python27\Scripts;C:\MinGW\bin;%PATH%
-  - pip install hererocks
+  - pip install git+https://github.com/luarocks/hererocks
   - hererocks lua_install --%LUA% --target %configuration% -r latest
   - call lua_install\bin\activate
-  - git clone --depth=1 https://github.com/lunarmodules/luacov
-  - cd luacov && luarocks make && cd ..
-  - luarocks install busted
+  - git clone --depth=1 https://github.com/lunarmodules/luacov luacov-src
+  - cd luacov-src && luarocks make && cd ..
+  - git clone --depth=1 https://github.com/lunarmodules/busted busted-src
+  - cd busted-src && luarocks make && cd ..
 
 build_script:
   - luarocks make --deps-mode=none
