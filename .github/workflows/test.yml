@@ -10,27 +10,46 @@ jobs:
   TestMatrix:
     strategy:
       matrix:
-        luaVersion: ["5.1", "5.2", "5.3", "5.4", "luajit"]
+        luaVersion: ["5.1", "5.2", "5.3", "5.4", "5.5", "luajit"]
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
     runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@master
 
+    - name: Checkout luacov
+      uses: actions/checkout@master
+      with:
+        repository: lunarmodules/luacov
+        path: luacov-src
+
+    - name: Checkout busted
+      uses: actions/checkout@master
+      with:
+        repository: lunarmodules/busted
+        path: busted-src
+
     - uses: ilammy/msvc-dev-cmd@v1
       if: ${{ ! contains(matrix.luaVersion, 'luajit') }}
 
-    - uses: hishamhm/gh-actions-lua@master
+    - uses: luarocks/gh-actions-lua@master
       with:
         luaVersion: ${{ matrix.luaVersion }}
 
-    - uses: hishamhm/gh-actions-luarocks@master
+    - uses: luarocks/gh-actions-luarocks@master
       with:
-        luaRocksVersion: "3.11.1"
+        luaRocksVersion: "3.13.0"
+
+    - name: Install luacov from its repository
+      working-directory: luacov-src
+      run: luarocks make
+
+    - name: Install busted from its repository
+      working-directory: busted-src
+      run: luarocks make
 
     - name: Prep
       run: |
-        luarocks install busted
         luarocks install busted-htest
         luarocks make
 
