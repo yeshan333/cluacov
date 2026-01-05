@@ -122,7 +122,11 @@ static void add_activelines(lua_State *L, Proto *p) {
     int currentline = p->linedefined;
 
 #if LUA_VERSION_RELEASE_NUM >= 50404
+#if LUA_VERSION_NUM >= 505
+    if (!isvararg(p))  /* regular function? */
+#else
     if (!p->is_vararg)  /* regular function? */
+#endif
       i = 0;  /* consider all instructions */
     else {  /* vararg function */
       currentline = nextline(p, currentline, 0);
