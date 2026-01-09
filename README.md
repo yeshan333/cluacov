@@ -1,9 +1,8 @@
 # cluacov
 
-[![Build Status](https://travis-ci.org/luarocks/cluacov.svg?branch=master)](https://travis-ci.org/luarocks/cluacov)
-[![Windows build status](https://ci.appveyor.com/api/projects/status/43h7ou3u0k62xx8v?svg=true)](https://ci.appveyor.com/project/luarocks/cluacov)
+[![CI](https://github.com/luarocks/cluacov/actions/workflows/test.yml/badge.svg)](./.github/workflows/test.yml) [![LuaRocks](https://img.shields.io/luarocks/v/luarocks/cluacov?label=LuaRocks&color=2c3e67)](https://luarocks.org/modules/luarocks/cluacov)
 
-C extensions for [LuaCov](https://github.com/keplerproject/luacov), improving
+C extensions for [LuaCov](https://github.com/luarocks/luacov), improving
 performance and reducing number of lines incorrectly marked as missed.
 
 To install using [LuaRocks](https://luarocks.org/) run
