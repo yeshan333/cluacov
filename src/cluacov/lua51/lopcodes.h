@@ -68,7 +68,7 @@ enum OpMode {iABC, iABx, iAsBx};  /* basic instruction format */
 
 
 /* creates a mask with `n' 1 bits at position `p' */
-#define MASK1(n,p)	((~((~(Instruction)0)<<n))<<p)
+#define MASK1(n,p)	((~((~(Instruction)0)<<(n)))<<(p))
 
 /* creates a mask with `n' 0 bits at position `p' */
 #define MASK0(n,p)	(~MASK1(n,p))
