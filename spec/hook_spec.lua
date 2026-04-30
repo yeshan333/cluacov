@@ -54,7 +54,7 @@ end
 describe("hook", function()
    describe("new", function()
       it("returns a function", function()
-         assert.function(hook_module.new(new_runner()))
+         assert.is_function(hook_module.new(new_runner()))
       end)
    end)
 
