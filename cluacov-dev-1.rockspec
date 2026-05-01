@@ -33,9 +33,11 @@ dependencies = {
 build = {
    type = "builtin",
    modules = {
+      ["cluacov.deepbranches"] = "src/cluacov/deepbranches.c",
       ["cluacov.deepactivelines"] = "src/cluacov/deepactivelines.c",
       ["cluacov.hook"] = "src/cluacov/hook.c",
-      ["cluacov.version"] = "src/cluacov/version.lua"
+      ["cluacov.version"] = "src/cluacov/version.lua",
+      ["cluacov.branchfilter"] = "src/cluacov/branchfilter.lua"
    }
 }
 

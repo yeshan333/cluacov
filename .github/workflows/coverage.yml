@@ -1,0 +1,103 @@
+name: coverage
+
+on:
+  push:
+    branches: master
+  pull_request:
+    branches: '*'
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+
+    - name: Checkout luacov
+      uses: actions/checkout@master
+      with:
+        repository: lunarmodules/luacov
+        path: luacov-src
+
+    - uses: luarocks/gh-actions-lua@master
+      with:
+        luaVersion: "5.5"
+
+    - uses: luarocks/gh-actions-luarocks@master
+      with:
+        luaRocksVersion: "3.13.0"
+
+    - name: Install dependencies
+      run: |
+        cd luacov-src && luarocks make && cd ..
+        luarocks make
+
+    - name: Install lcov
+      run: sudo apt-get install -y lcov
+
+    - name: Run E2E branch coverage
+      run: lua e2e/e2e_branch_coverage.lua
+
+    - name: Generate summary
+      run: |
+        LCOV_FILE=e2e/output/coverage.lcov
+
+        LF=$(grep -m1 '^LF:' "$LCOV_FILE" | cut -d: -f2)
+        LH=$(grep -m1 '^LH:' "$LCOV_FILE" | cut -d: -f2)
+        FNF=$(grep -m1 '^FNF:' "$LCOV_FILE" | cut -d: -f2)
+        FNH=$(grep -m1 '^FNH:' "$LCOV_FILE" | cut -d: -f2)
+        BRF=$(grep -m1 '^BRF:' "$LCOV_FILE" | cut -d: -f2)
+        BRH=$(grep -m1 '^BRH:' "$LCOV_FILE" | cut -d: -f2)
+
+        LINE_PCT=$(awk "BEGIN { printf \"%.1f\", ($LH/$LF)*100 }")
+        FUNC_PCT=$(awk "BEGIN { printf \"%.1f\", ($FNH/$FNF)*100 }")
+        BR_PCT=$(awk "BEGIN { printf \"%.1f\", ($BRH/$BRF)*100 }")
+
+        cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+        ## Branch Coverage Report
+
+        | Metric | Total | Hit | Coverage |
+        |--------|-------|-----|----------|
+        | Lines | $LF | $LH | $LINE_PCT% |
+        | Functions | $FNF | $FNH | $FUNC_PCT% |
+        | Branches | $BRF | $BRH | $BR_PCT% |
+
+        [Full HTML Report](https://yeshan333.github.io/cluacov/)
+        EOF
+
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: e2e/output/html/
+
+  deploy:
+    if: github.ref == 'refs/heads/master'
+    needs: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+    - name: Download coverage artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: coverage-report
+        path: html
+
+    - name: Configure Pages
+      uses: actions/configure-pages@v5
+
+    - name: Upload to Pages
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: html
+
+    - name: Deploy to Pages
+      id: deployment
+      uses: actions/deploy-pages@v4
