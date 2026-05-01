@@ -9,6 +9,7 @@ on:
 jobs:
   TestMatrix:
     strategy:
+      fail-fast: false
       matrix:
         luaVersion: ["5.1", "5.2", "5.3", "5.4", "5.5", "luajit"]
         os: ["ubuntu-latest", "macos-latest", "windows-latest"]
@@ -22,6 +23,7 @@ jobs:
       with:
         repository: lunarmodules/luacov
         path: luacov-src
+        ref: master
 
     - uses: ilammy/msvc-dev-cmd@v1
       if: ${{ ! contains(matrix.luaVersion, 'luajit') }}
