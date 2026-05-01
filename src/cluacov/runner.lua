@@ -213,6 +213,7 @@ runner.tick = false
 runner.paused = false
 
 function runner.save_stats()
+   if not runner.initialized then return end
    if runner.paused then return end
    local all_line_hits = pchook.get_all_line_hits()
    local all_hits = pchook.get_all_hits()
@@ -250,6 +251,7 @@ function runner.init(configfile)
    end
 
    runner.tick = runner.config.tick or false
+   runner.initialized = true
 
    if runner.tick then
       pchook.start({
@@ -270,8 +272,6 @@ function runner.init(configfile)
       debug.setmetatable(anchor, { __gc = on_exit })
       runner._anchor = anchor
    end
-
-   runner.initialized = true
 end
 
 runner.init()
