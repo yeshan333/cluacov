@@ -99,10 +99,10 @@ The approach is:
 
 ### Compound Conditions
 
-Lua's debug hook fires at **line** level, not instruction level. When a single
+Lua's **line-level** debug hook fires once per source line. When a single
 source line contains multiple branch instructions (e.g. `if a or b or c`
-compiles to 3 TEST instructions), they all share the same line-hit count.
-Per-instruction branch coverage is impossible under Lua's runtime model.
+compiles to 3 TEST instructions), they all share the same line-hit count —
+per-instruction distinction is impossible with line-level hooks alone.
 
 **Filtering rule**: for lines with multiple branches, only report branches
 whose **both targets are on different lines** from the branch line. These are
@@ -122,10 +122,11 @@ This naturally handles:
 - **`if a or b or c`** — same pattern: only the last TEST (with both targets
   off-line) is reported.
 
-> **Why not instruction-level coverage?** C/gcov inserts arc counters at
-> compile time, tracking every branch instruction individually. Lua only
-> provides a line-level debug hook, so same-line instructions are
-> indistinguishable at runtime.
+> **Why not instruction-level coverage with this approach?** C/gcov inserts
+> arc counters at compile time, tracking every branch instruction individually.
+> Lua's line-level debug hook makes same-line instructions indistinguishable.
+> For true per-instruction coverage on Lua 5.4+, use
+> [pchook](#per-pc-branch-coverage-cluacovpchook--cluacovbranchcov).
 
 ### Reading branch coverage in HTML reports
 
@@ -239,9 +240,12 @@ functions) and returns an array of entries:
 
 Each entry's `hits` table maps 1-based PC to execution count.
 
-> **Performance note:** instruction-level hooks fire on every VM instruction,
-> which is significantly slower than line-level hooks. Use `pchook` for coverage
-> analysis, not production monitoring.
+> **Performance note:** instruction-level hooks fire on every VM instruction.
+> Despite the higher event rate, per-call cost is lower than the cluacov C line
+> hook (no `lua_getstack` call) — overall overhead is comparable and often lower
+> (see [benchmark](../docs/benchmark.md)). Both modes add significant overhead
+> vs a no-hook baseline; use `pchook` for coverage analysis, not production
+> monitoring.
 
 ### `cluacov.branchcov` API
 
