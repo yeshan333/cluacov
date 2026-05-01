@@ -13,7 +13,9 @@ describe("branchcov", function()
       pchook.reset()
    end)
 
-   if jit then
+   local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
+
+   if jit or lua_version < 5.4 then
       pending("branchcov requires PUC-Rio Lua 5.4+")
    else
       describe("analyze", function()

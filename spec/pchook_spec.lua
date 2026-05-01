@@ -18,14 +18,20 @@ describe("pchook", function()
       end)
    end)
 
-   if jit then
-      describe("on LuaJIT", function()
+   local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
+
+   if jit or lua_version < 5.4 then
+      describe("on unsupported Lua", function()
          it("errors on start", function()
             assert.error(function() pchook.start() end)
          end)
 
          it("returns empty table from get_hits", function()
             assert.same({}, pchook.get_hits(function() end))
+         end)
+
+         it("returns empty table from get_line_hits", function()
+            assert.same({}, pchook.get_line_hits(function() end))
          end)
       end)
    else
