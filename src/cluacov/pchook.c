@@ -286,7 +286,7 @@ static int l_get_hits(lua_State *L) {
 }
 
 static int l_reset(lua_State *L) {
-    lua_pushnil(L);
+    lua_newtable(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);

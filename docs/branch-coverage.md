@@ -219,7 +219,7 @@ pchook.start()                     -- register instruction-level C hook
 pchook.stop()                      -- remove hook
 
 local hits = pchook.get_hits(func) -- per-proto PC hit tables
-pchook.reset()                     -- clear all recorded data
+pchook.reset()                     -- clear all recorded data (collection continues)
 ```
 
 `pchook.start()` calls `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` to fire a

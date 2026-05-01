@@ -205,7 +205,7 @@ pchook.start()                     -- 注册指令级 C hook
 pchook.stop()                      -- 移除 hook
 
 local hits = pchook.get_hits(func) -- 按 Proto 返回 PC 命中表
-pchook.reset()                     -- 清空所有记录数据
+pchook.reset()                     -- 清空所有记录数据（采集继续运行）
 ```
 
 `pchook.start()` 调用 `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` 在每条 VM

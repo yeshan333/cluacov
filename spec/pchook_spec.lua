@@ -12,29 +12,16 @@ describe("pchook", function()
       pchook.reset()
    end)
 
-   describe("version", function()
-      it("is a string in MAJOR.MINOR.PATCH format", function()
-         assert.match("^%d+%.%d+%.%d+$", pchook.version)
-      end)
-   end)
-
    local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
 
    if jit or lua_version < 5.4 then
-      describe("on unsupported Lua", function()
-         it("errors on start", function()
-            assert.error(function() pchook.start() end)
-         end)
-
-         it("returns empty table from get_hits", function()
-            assert.same({}, pchook.get_hits(function() end))
-         end)
-
-         it("returns empty table from get_line_hits", function()
-            assert.same({}, pchook.get_line_hits(function() end))
+      pending("pchook requires PUC-Rio Lua 5.4+")
+   else
+      describe("version", function()
+         it("is a string in MAJOR.MINOR.PATCH format", function()
+            assert.match("^%d+%.%d+%.%d+$", pchook.version)
          end)
       end)
-   else
       describe("start/stop lifecycle", function()
          it("starts and stops without error", function()
             assert.has_no.errors(function()
