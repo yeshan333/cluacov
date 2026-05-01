@@ -1,5 +1,6 @@
 -- luacheck: std +busted
 local load = loadstring or load -- luacheck: compat
+local is_windows = package.config:sub(1, 1) == "\\"
 
 describe("cluacov.runner", function()
    local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
@@ -13,9 +14,13 @@ describe("cluacov.runner", function()
 
       setup(function()
          tmpdir = os.tmpname() .. "_runner_test"
-         os.execute("mkdir -p " .. tmpdir)
+         if is_windows then
+            os.execute('mkdir "' .. tmpdir .. '"')
+         else
+            os.execute("mkdir -p " .. tmpdir)
+         end
 
-         sample_file = tmpdir .. "/sample.lua"
+         sample_file = tmpdir .. (is_windows and "\\" or "/") .. "sample.lua"
          local fh = assert(io.open(sample_file, "w"))
          fh:write([[
 local M = {}
@@ -31,7 +36,7 @@ return M
 ]])
          fh:close()
 
-         test_file = tmpdir .. "/test.lua"
+         test_file = tmpdir .. (is_windows and "\\" or "/") .. "test.lua"
          fh = assert(io.open(test_file, "w"))
          fh:write(string.format([[
 package.path = %q .. "/?.lua;" .. package.path
@@ -44,14 +49,32 @@ assert(sample.check(5) == "positive")
 
       teardown(function()
          if tmpdir then
-            os.execute("rm -rf " .. tmpdir)
+            if is_windows then
+               os.execute('rmdir /s /q "' .. tmpdir .. '"')
+            else
+               os.execute("rm -rf " .. tmpdir)
+            end
          end
       end)
 
+      local function run_with_config(tmpdir_path, luacov_cfg)
+         local cmd
+         if is_windows then
+            cmd = string.format(
+               'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner test.lua 2>&1',
+               luacov_cfg, tmpdir_path)
+         else
+            cmd = string.format(
+               "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner test.lua 2>&1",
+               tmpdir_path, luacov_cfg)
+         end
+         os.execute(cmd)
+      end
+
       it("generates luacov stats and LCOV files", function()
-         local stats_file = tmpdir .. "/luacov.stats.out"
-         local lcov_file = tmpdir .. "/lcov.info"
-         local luacov_cfg = tmpdir .. "/.luacov"
+         local stats_file = tmpdir .. (is_windows and "\\" or "/") .. "luacov.stats.out"
+         local lcov_file = tmpdir .. (is_windows and "\\" or "/") .. "lcov.info"
+         local luacov_cfg = tmpdir .. (is_windows and "\\" or "/") .. ".luacov"
 
          local cfg_fh = assert(io.open(luacov_cfg, "w"))
          cfg_fh:write(string.format([[
@@ -63,10 +86,7 @@ return {
 ]], stats_file, lcov_file))
          cfg_fh:close()
 
-         local cmd = string.format(
-            "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner test.lua 2>&1",
-            tmpdir, luacov_cfg)
-         os.execute(cmd)
+         run_with_config(tmpdir, luacov_cfg)
 
          local sfh = io.open(stats_file, "r")
          assert.is_truthy(sfh, "stats file should exist")
@@ -86,10 +106,10 @@ return {
       end)
 
       it("excludes cluacov modules from output", function()
-         local stats_file = tmpdir .. "/luacov2.stats.out"
-         local lcov_file = tmpdir .. "/lcov2.info"
+         local stats_file = tmpdir .. (is_windows and "\\" or "/") .. "luacov2.stats.out"
+         local lcov_file = tmpdir .. (is_windows and "\\" or "/") .. "lcov2.info"
 
-         local luacov_cfg = tmpdir .. "/.luacov2"
+         local luacov_cfg = tmpdir .. (is_windows and "\\" or "/") .. ".luacov2"
          local cfg_fh = assert(io.open(luacov_cfg, "w"))
          cfg_fh:write(string.format([[
 return {
@@ -99,10 +119,7 @@ return {
 ]], stats_file, lcov_file))
          cfg_fh:close()
 
-         local cmd = string.format(
-            "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner test.lua 2>&1",
-            tmpdir, luacov_cfg)
-         os.execute(cmd)
+         run_with_config(tmpdir, luacov_cfg)
 
          local lfh = io.open(lcov_file, "r")
          assert.is_truthy(lfh)
@@ -112,10 +129,10 @@ return {
       end)
 
       it("saves stats periodically when tick is enabled", function()
-         local stats_file = tmpdir .. "/luacov_tick.stats.out"
-         local lcov_file = tmpdir .. "/lcov_tick.info"
+         local stats_file = tmpdir .. (is_windows and "\\" or "/") .. "luacov_tick.stats.out"
+         local lcov_file = tmpdir .. (is_windows and "\\" or "/") .. "lcov_tick.info"
 
-         local luacov_cfg = tmpdir .. "/.luacov_tick"
+         local luacov_cfg = tmpdir .. (is_windows and "\\" or "/") .. ".luacov_tick"
          local cfg_fh = assert(io.open(luacov_cfg, "w"))
          cfg_fh:write(string.format([[
 return {
@@ -128,10 +145,7 @@ return {
 ]], stats_file, lcov_file))
          cfg_fh:close()
 
-         local cmd = string.format(
-            "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner test.lua 2>&1",
-            tmpdir, luacov_cfg)
-         os.execute(cmd)
+         run_with_config(tmpdir, luacov_cfg)
 
          local sfh = io.open(stats_file, "r")
          assert.is_truthy(sfh, "tick stats file should exist")
