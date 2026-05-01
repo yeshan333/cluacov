@@ -9,6 +9,9 @@ To install using [LuaRocks](https://luarocks.org/) run
 `luarocks install cluacov`. cluacov depends on luacov, so that running this
 command is enough to set up luacov with extensions.
 
+See [docs/getting-started.md](docs/getting-started.md) for a quick-start guide
+on how to add cluacov to your project.
+
 `cluacov.deepbranches` analyzes Lua bytecode to discover branch sites within
 functions. It reports conditional branches (`if`/`elseif`/`and`/`or`), numeric
 `for` loops, and generic `for` iterators. Combined with LuaCov line-hit data,
