@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" width="960" height="600">
+  <style>
+    text { font-family: 'Helvetica Neue', Helvetica, Arial, 'PingFang SC', 'Microsoft YaHei', 'Microsoft JhengHei', 'SimHei', sans-serif; }
+  </style>
+  <rect width="960" height="600" fill="#ffffff"/>
+  <text x="480" y="36" text-anchor="middle" font-size="18" font-weight="600" fill="#111827">cluacov: Old vs New Coverage Architecture</text>
+  <rect x="40" y="70" width="820" height="44" rx="6" ry="6" fill="#111827"/>
+  <text x="170" y="97" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">Attribute</text>
+  <text x="440" y="97" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">Old (hook.c)</text>
+  <text x="720" y="97" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">New (pchook.c + branchcov.lua)</text>
+  <rect x="40" y="114" width="820" height="36" fill="#f9fafb"/>
+  <text x="50" y="136" font-size="12" fill="#111827">Hook Type</text>
+  <text x="310" y="136" text-anchor="middle" font-size="11" fill="#374151">LUA_MASKLINE</text>
+  <text x="580" y="136" text-anchor="middle" font-size="11" fill="#374151">LUA_MASKCOUNT (count=1)</text>
+  <rect x="40" y="150" width="820" height="36" fill="#ffffff"/>
+  <text x="50" y="172" font-size="12" fill="#111827">Granularity</text>
+  <text x="310" y="172" text-anchor="middle" font-size="11" fill="#374151">Per source line</text>
+  <text x="580" y="172" text-anchor="middle" font-size="11" fill="#374151">Per bytecode instruction (PC)</text>
+  <rect x="40" y="186" width="820" height="36" fill="#f9fafb"/>
+  <text x="50" y="208" font-size="12" fill="#111827">Branch Coverage</text>
+  <text x="310" y="208" text-anchor="middle" font-size="11" fill="#374151">Indirect, via line-hit x-ref</text>
+  <text x="580" y="208" text-anchor="middle" font-size="11" fill="#374151">Direct, per-target PC lookup</text>
+  <rect x="40" y="222" width="820" height="36" fill="#ffffff"/>
+  <text x="50" y="244" font-size="12" fill="#111827">Compound Conditions</text>
+  <text x="310" y="244" text-anchor="middle" font-size="11" fill="#374151">Blind: if a or b or c = 1 hit</text>
+  <text x="580" y="244" text-anchor="middle" font-size="11" fill="#374151">Each TEST instruction counted</text>
+  <rect x="40" y="258" width="820" height="36" fill="#f9fafb"/>
+  <text x="50" y="280" font-size="12" fill="#111827">Filtering Required</text>
+  <text x="310" y="280" text-anchor="middle" font-size="11" fill="#374151">Yes (branchfilter.lua)</text>
+  <text x="580" y="280" text-anchor="middle" font-size="11" fill="#374151">No — all instructions measurable</text>
+  <rect x="40" y="294" width="820" height="36" fill="#ffffff"/>
+  <text x="50" y="316" font-size="12" fill="#111827">Lua 5.1-5.3</text>
+  <text x="310" y="316" text-anchor="middle" font-size="11" fill="#374151">Supported</text>
+  <text x="580" y="316" text-anchor="middle" font-size="11" fill="#374151">Not supported (error)</text>
+  <rect x="40" y="330" width="820" height="36" fill="#f9fafb"/>
+  <text x="50" y="352" font-size="12" fill="#111827">Lua 5.4-5.5</text>
+  <text x="310" y="352" text-anchor="middle" font-size="11" fill="#374151">Supported</text>
+  <text x="580" y="352" text-anchor="middle" font-size="11" fill="#374151">Supported</text>
+  <rect x="40" y="366" width="820" height="36" fill="#ffffff"/>
+  <text x="50" y="388" font-size="12" fill="#111827">LuaJIT</text>
+  <text x="310" y="388" text-anchor="middle" font-size="11" fill="#374151">Supported</text>
+  <text x="580" y="388" text-anchor="middle" font-size="11" fill="#374151">Not supported (error)</text>
+  <rect x="40" y="402" width="820" height="36" fill="#f9fafb"/>
+  <text x="50" y="424" font-size="12" fill="#111827">Performance</text>
+  <text x="310" y="424" text-anchor="middle" font-size="11" fill="#374151">Moderate (1 call/line)</text>
+  <text x="580" y="424" text-anchor="middle" font-size="11" fill="#374151">Slower (fires every instruction)</text>
+  <rect x="40" y="438" width="820" height="36" fill="#ffffff"/>
+  <text x="50" y="460" font-size="12" fill="#111827">Output Format</text>
+  <text x="310" y="460" text-anchor="middle" font-size="11" fill="#374151">luacov.stats.out</text>
+  <text x="580" y="460" text-anchor="middle" font-size="11" fill="#374151">luacov.stats.out + lcov.info</text>
+  <line x1="40" y1="520" x2="860" y2="520" stroke="#d1d5db" stroke-width="0.5"/>
+  <text x="480" y="540" text-anchor="middle" font-size="14" font-weight="600" fill="#111827">Summary</text>
+  <rect x="60" y="550" width="400" height="80" rx="6" ry="6" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <text x="70" y="568" font-size="11" font-weight="600" fill="#dc2626">Old approach: Line-level coverage</text>
+  <text x="70" y="584" font-size="10" fill="#6b7280">Works on all Lua versions but cannot distinguish</text>
+  <text x="70" y="598" font-size="10" fill="#6b7280">sub-conditions in compound boolean expressions.</text>
+  <text x="70" y="612" font-size="10" fill="#6b7280">Branch coverage is approximate at best.</text>
+  <rect x="500" y="550" width="400" height="80" rx="6" ry="6" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="510" y="568" font-size="11" font-weight="600" fill="#16a34a">New approach: Per-instruction coverage</text>
+  <text x="510" y="584" font-size="10" fill="#6b7280">Provides true per-PC branch coverage on Lua 5.4+.</text>
+  <text x="510" y="598" font-size="10" fill="#6b7280">Compound conditions are fully measured.</text>
+  <text x="510" y="612" font-size="10" fill="#6b7280">Trade-off: slower and limited to Lua 5.4+.</text>
+  <text x="480" y="640" text-anchor="middle" font-size="12" font-weight="600" fill="#6b7280">Both approaches use deepbranches.c (static branch discovery) and deepactivelines.c (active line detection).</text>
+  <text x="480" y="656" text-anchor="middle" font-size="12" fill="#9ca3ac">The new approach replaces line-level hooking with instruction-level counting, enabling precise branch coverage.</text>
+</svg>
