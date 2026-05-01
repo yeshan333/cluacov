@@ -1,0 +1,626 @@
+#include "lua.h"
+#include "lauxlib.h"
+
+#if LUA_VERSION_NUM > 501 || defined(LUAI_BITSINT)
+#define PUCRIOLUA
+#endif
+
+#if defined(PUCRIOLUA) && LUA_VERSION_NUM >= 504
+
+#if LUA_VERSION_NUM == 504
+#include "lua54/lobject.h"
+#include "lua54/lstate_min.h"
+#elif LUA_VERSION_NUM == 505
+#include "lua55/lobject.h"
+#include "lua55/lstate_min.h"
+#else
+#error "pchook: unsupported Lua version (need 5.4+)"
+#endif
+
+static char PCHOOK_KEY;
+static char TICK_KEY;
+static char SNAPSHOT_LINE_HITS_KEY;
+static char SNAPSHOT_ALL_HITS_KEY;
+
+static Proto *get_proto(lua_State *L, int idx) {
+    return ((Closure *) lua_topointer(L, idx))->l.p;
+}
+
+#define ABSLINEINFO (-0x80)
+
+#if !defined(MAXIWTHABS)
+#define MAXIWTHABS 128
+#endif
+
+static int getbaseline(const Proto *f, int pc, int *basepc) {
+    if (f->sizeabslineinfo == 0 || pc < f->abslineinfo[0].pc) {
+        *basepc = -1;
+        return f->linedefined;
+    } else {
+        int i = cast_uint(pc) / MAXIWTHABS - 1;
+        while (i + 1 < f->sizeabslineinfo && pc >= f->abslineinfo[i + 1].pc) {
+            i++;
+        }
+        *basepc = f->abslineinfo[i].pc;
+        return f->abslineinfo[i].line;
+    }
+}
+
+static int luaG_getfuncline(const Proto *f, int pc) {
+    if (f->lineinfo == NULL) {
+        return -1;
+    } else {
+        int basepc;
+        int baseline = getbaseline(f, pc, &basepc);
+        while (basepc++ < pc) {
+            baseline += f->lineinfo[basepc];
+        }
+        return baseline;
+    }
+}
+
+static int get_pc_line(const Proto *proto, int pc) {
+    if (pc < 0 || pc >= proto->sizecode) {
+        return 0;
+    }
+    return luaG_getfuncline(proto, pc);
+}
+
+static void pc_hook(lua_State *L, lua_Debug *ar) {
+    /* Handle tick on line events. */
+    if (ar->event == LUA_HOOKLINE) {
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
+        if (!lua_isnil(L, -1)) {
+            lua_Integer steps, savestepsize;
+
+            lua_getfield(L, -1, "savestepsize");
+            savestepsize = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            lua_getfield(L, -1, "steps");
+            steps = lua_tointeger(L, -1) + 1;
+            lua_pop(L, 1);
+
+            if (steps >= savestepsize) {
+                steps = 0;
+                lua_getfield(L, -1, "save_stats");
+                lua_call(L, 0, 0);
+            }
+
+            lua_pushinteger(L, steps);
+            lua_setfield(L, -2, "steps");
+        }
+        lua_pop(L, 1);
+        return;
+    }
+
+    /* Handle PC tracking on count events. */
+    Proto *proto;
+    const void *proto_key;
+    CallInfo *ci;
+    int pc;
+    lua_Integer count;
+
+    lua_getinfo(L, "f", ar);
+
+    if (lua_iscfunction(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    proto = get_proto(L, -1);
+    proto_key = (const void *)proto;
+    lua_pop(L, 1);
+
+    ci = (CallInfo *)ar->i_ci;
+    pc = (int)(ci->u.l.savedpc - proto->code);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        return;
+    }
+
+    lua_rawgetp(L, -1, proto_key);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushvalue(L, -1);
+        lua_rawsetp(L, -3, proto_key);
+    }
+
+    lua_rawgeti(L, -1, pc);
+    count = lua_tointeger(L, -1) + 1;
+    lua_pop(L, 1);
+    lua_pushinteger(L, count);
+    lua_rawseti(L, -2, pc);
+
+    lua_pop(L, 2);
+}
+
+static const char *get_source_name(const Proto *proto);
+static int l_get_all_line_hits(lua_State *L);
+static int l_get_all_hits(lua_State *L);
+
+static int l_start(lua_State *L) {
+    int mask;
+
+    /* Clear stale snapshots from previous stop(). */
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    mask = LUA_MASKCOUNT;
+
+    if (!lua_isnoneornil(L, 1)) {
+        luaL_checktype(L, 1, LUA_TTABLE);
+
+        /* Validate savestepsize. */
+        lua_getfield(L, 1, "savestepsize");
+        if (lua_isnil(L, -1) || lua_tointeger(L, -1) < 1) {
+            lua_pop(L, 1);
+            return luaL_error(L,
+                "tick config requires savestepsize >= 1");
+        }
+        lua_pop(L, 1);
+
+        /* Validate save_stats is a function. */
+        lua_getfield(L, 1, "save_stats");
+        if (!lua_isfunction(L, -1)) {
+            lua_pop(L, 1);
+            return luaL_error(L,
+                "tick config requires save_stats to be a function");
+        }
+        lua_pop(L, 1);
+
+        /* Initialize steps counter if not set. */
+        lua_getfield(L, 1, "steps");
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            lua_pushinteger(L, 0);
+            lua_setfield(L, 1, "steps");
+        } else {
+            lua_pop(L, 1);
+        }
+        lua_pushvalue(L, 1);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
+        mask |= LUA_MASKLINE;
+    } else {
+        lua_pushnil(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
+    }
+
+    lua_sethook(L, pc_hook, mask, 1);
+    return 0;
+}
+
+static int l_stop(lua_State *L) {
+    /* Snapshot data before removing hook, so get_all_line_hits/get_all_hits
+       can safely return cached data even after Proto* pointers are invalid
+       (e.g. during GC finalizer at process exit). */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (!lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        /* Build and cache snapshots while Proto* pointers are still valid. */
+        l_get_all_line_hits(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+
+        l_get_all_hits(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    } else {
+        lua_pop(L, 1);
+    }
+
+    lua_sethook(L, NULL, 0, 0);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
+    return 0;
+}
+
+static void collect_proto_hits(
+    lua_State *L,
+    Proto *proto,
+    int hits_idx,
+    int result_idx,
+    int *count
+) {
+    const void *proto_key = (const void *)proto;
+    int i;
+
+    lua_newtable(L);
+
+    lua_pushinteger(L, proto->linedefined);
+    lua_setfield(L, -2, "linedefined");
+
+    lua_pushinteger(L, proto->sizecode);
+    lua_setfield(L, -2, "sizecode");
+
+    lua_rawgetp(L, hits_idx, proto_key);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+    }
+    lua_setfield(L, -2, "hits");
+
+    lua_rawseti(L, result_idx, ++(*count));
+
+    for (i = 0; i < proto->sizep; i++) {
+        collect_proto_hits(L, proto->p[i], hits_idx, result_idx, count);
+    }
+}
+
+static int l_get_hits(lua_State *L) {
+    Proto *proto;
+    int hits_idx, result_idx;
+    int count = 0;
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    luaL_argcheck(L, !lua_iscfunction(L, 1), 1,
+        "Lua function expected, got C function");
+
+    proto = get_proto(L, 1);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+    }
+    hits_idx = lua_gettop(L);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    collect_proto_hits(L, proto, hits_idx, result_idx, &count);
+
+    return 1;
+}
+
+static int l_reset(lua_State *L) {
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    return 0;
+}
+
+static void collect_line_hits(
+    lua_State *L,
+    Proto *proto,
+    int hits_idx,
+    int result_idx
+) {
+    const void *proto_key = (const void *)proto;
+    int pc, line, max_line;
+    lua_Integer existing, count;
+    int i;
+
+    for (pc = 0; pc < proto->sizecode; pc++) {
+        line = get_pc_line(proto, pc);
+        if (line <= 0) continue;
+
+        lua_rawgeti(L, result_idx, line);
+        existing = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        if (existing == 0) {
+            lua_pushinteger(L, 0);
+            lua_rawseti(L, result_idx, line);
+        }
+
+        lua_getfield(L, result_idx, "max");
+        max_line = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        if (line > max_line) {
+            lua_pushinteger(L, line);
+            lua_setfield(L, result_idx, "max");
+        }
+    }
+
+    lua_rawgetp(L, hits_idx, proto_key);
+    if (!lua_isnil(L, -1)) {
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0) {
+            int pc1based = (int)lua_tointeger(L, -2);
+            count = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            line = get_pc_line(proto, pc1based - 1);
+            if (line <= 0) continue;
+
+            lua_rawgeti(L, result_idx, line);
+            existing = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            if (count > existing) {
+                lua_pushinteger(L, count);
+                lua_rawseti(L, result_idx, line);
+            }
+        }
+    }
+    lua_pop(L, 1);
+
+    for (i = 0; i < proto->sizep; i++) {
+        collect_line_hits(L, proto->p[i], hits_idx, result_idx);
+    }
+}
+
+static int l_get_line_hits(lua_State *L) {
+    Proto *proto;
+    int hits_idx, result_idx;
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    luaL_argcheck(L, !lua_iscfunction(L, 1), 1,
+        "Lua function expected, got C function");
+
+    proto = get_proto(L, 1);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+    }
+    hits_idx = lua_gettop(L);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    lua_pushinteger(L, 0);
+    lua_setfield(L, result_idx, "max");
+
+    collect_line_hits(L, proto, hits_idx, result_idx);
+
+    return 1;
+}
+
+static const char *get_source_name(const Proto *proto) {
+    if (proto->source == NULL) return NULL;
+    return getstr(proto->source);
+}
+
+static int l_get_all_hits(lua_State *L) {
+    /* Return cached snapshot if available (safe during GC). */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    if (!lua_isnil(L, -1)) {
+        return 1;
+    }
+    lua_pop(L, 1);
+
+    int outer_idx, result_idx;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        return 1;
+    }
+    outer_idx = lua_gettop(L);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    lua_pushnil(L);
+    while (lua_next(L, outer_idx) != 0) {
+        const Proto *proto;
+        const char *source;
+        int count;
+
+        if (!lua_islightuserdata(L, -2)) {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        proto = (const Proto *)lua_topointer(L, -2);
+        source = get_source_name(proto);
+        if (source == NULL) {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        lua_getfield(L, result_idx, source);
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setfield(L, result_idx, source);
+        }
+
+        count = (int)lua_rawlen(L, -1);
+
+        lua_newtable(L);
+
+        lua_pushinteger(L, proto->linedefined);
+        lua_setfield(L, -2, "linedefined");
+
+        lua_pushinteger(L, proto->sizecode);
+        lua_setfield(L, -2, "sizecode");
+
+        lua_pushvalue(L, -3);
+        lua_setfield(L, -2, "hits");
+
+        lua_rawseti(L, -2, count + 1);
+
+        lua_pop(L, 1);
+        lua_pop(L, 1);
+    }
+
+    return 1;
+}
+
+static int l_get_all_line_hits(lua_State *L) {
+    /* Return cached snapshot if available (safe during GC). */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    if (!lua_isnil(L, -1)) {
+        return 1;
+    }
+    lua_pop(L, 1);
+
+    int outer_idx, result_idx;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        return 1;
+    }
+    outer_idx = lua_gettop(L);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    lua_pushnil(L);
+    while (lua_next(L, outer_idx) != 0) {
+        const Proto *proto;
+        const char *source;
+        int file_idx, pc, line, max_line;
+        lua_Integer existing, count;
+
+        if (!lua_islightuserdata(L, -2)) {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        proto = (const Proto *)lua_topointer(L, -2);
+        source = get_source_name(proto);
+        if (source == NULL) {
+            lua_pop(L, 1);
+            continue;
+        }
+
+        lua_getfield(L, result_idx, source);
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushinteger(L, 0);
+            lua_setfield(L, -2, "max");
+            lua_pushvalue(L, -1);
+            lua_setfield(L, result_idx, source);
+        }
+        file_idx = lua_gettop(L);
+
+        for (pc = 0; pc < proto->sizecode; pc++) {
+            line = get_pc_line(proto, pc);
+            if (line <= 0) continue;
+
+            lua_rawgeti(L, file_idx, line);
+            existing = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            if (existing == 0) {
+                lua_pushinteger(L, 0);
+                lua_rawseti(L, file_idx, line);
+            }
+
+            lua_getfield(L, file_idx, "max");
+            max_line = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            if (line > max_line) {
+                lua_pushinteger(L, line);
+                lua_setfield(L, file_idx, "max");
+            }
+        }
+
+        lua_pushnil(L);
+        while (lua_next(L, -3) != 0) {
+            int pc1based = (int)lua_tointeger(L, -2);
+            count = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            line = get_pc_line(proto, pc1based - 1);
+            if (line <= 0) continue;
+
+            lua_rawgeti(L, file_idx, line);
+            existing = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+
+            if (count > existing) {
+                lua_pushinteger(L, count);
+                lua_rawseti(L, file_idx, line);
+            }
+        }
+
+        lua_pop(L, 1);
+        lua_pop(L, 1);
+    }
+
+    return 1;
+}
+
+#else /* Lua < 5.4 or LuaJIT */
+
+static int l_start(lua_State *L) {
+    return luaL_error(L, "pchook requires PUC-Rio Lua 5.4 or later");
+}
+
+static int l_stop(lua_State *L) {
+    (void)L;
+    return 0;
+}
+
+static int l_get_hits(lua_State *L) {
+    lua_newtable(L);
+    return 1;
+}
+
+static int l_reset(lua_State *L) {
+    (void)L;
+    return 0;
+}
+
+static int l_get_line_hits(lua_State *L) {
+    lua_newtable(L);
+    return 1;
+}
+
+static int l_get_all_hits(lua_State *L) {
+    (void)L;
+    lua_newtable(L);
+    return 1;
+}
+
+static int l_get_all_line_hits(lua_State *L) {
+    (void)L;
+    lua_newtable(L);
+    return 1;
+}
+
+#endif
+
+int luaopen_cluacov_pchook(lua_State *L) {
+    lua_newtable(L);
+
+    lua_pushcfunction(L, l_start);
+    lua_setfield(L, -2, "start");
+
+    lua_pushcfunction(L, l_stop);
+    lua_setfield(L, -2, "stop");
+
+    lua_pushcfunction(L, l_get_hits);
+    lua_setfield(L, -2, "get_hits");
+
+    lua_pushcfunction(L, l_reset);
+    lua_setfield(L, -2, "reset");
+
+    lua_pushcfunction(L, l_get_line_hits);
+    lua_setfield(L, -2, "get_line_hits");
+
+    lua_pushcfunction(L, l_get_all_hits);
+    lua_setfield(L, -2, "get_all_hits");
+
+    lua_pushcfunction(L, l_get_all_line_hits);
+    lua_setfield(L, -2, "get_all_line_hits");
+
+    lua_pushliteral(L, "1.0.0");
+    lua_setfield(L, -2, "version");
+
+    return 1;
+}

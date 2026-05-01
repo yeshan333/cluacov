@@ -20,6 +20,7 @@ jobs:
       with:
         repository: lunarmodules/luacov
         path: luacov-src
+        ref: master
 
     - uses: luarocks/gh-actions-lua@master
       with:
