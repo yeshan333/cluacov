@@ -1,5 +1,6 @@
 -- luacheck: std +busted
 local hook_module = require "cluacov.hook"
+local loadstring = loadstring or load -- luacheck: compat
 
 local function new_runner(overrides)
    local runner = {
