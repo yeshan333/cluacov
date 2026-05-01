@@ -57,4 +57,4 @@ long-running processes.
 | **Compound conditions** | Blind: `if a or b or c` = 1 hit | Each TEST instruction counted |
 | **Lua 5.1–5.3** | Supported | Not supported |
 | **LuaJIT** | Supported | Not supported |
-| **Performance** | Moderate | Comparable; faster on loop-heavy code ([benchmark](docs/benchmark.md)) |
+| **Performance** | Moderate | Comparable; faster on loop-heavy code, slower overall ([benchmark](docs/benchmark.md)) |

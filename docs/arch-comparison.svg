@@ -45,10 +45,10 @@
   <rect x="40" y="386" width="820" height="36" fill="#f9fafb"/>
   <text x="50" y="402" font-size="12" fill="#111827">Performance</text>
   <text x="50" y="416" font-size="9" fill="#6b7280">see docs/benchmark.md</text>
-  <text x="440" y="402" text-anchor="middle" font-size="11" fill="#374151">Moderate (~27x overhead)</text>
+  <text x="440" y="402" text-anchor="middle" font-size="11" fill="#16a34a" font-weight="600">Moderate (~28x overhead)</text>
   <text x="440" y="416" text-anchor="middle" font-size="10" fill="#9ca3af">1 call / source line</text>
-  <text x="720" y="402" text-anchor="middle" font-size="11" fill="#16a34a" font-weight="600">Comparable (~22x overhead)</text>
-  <text x="720" y="416" text-anchor="middle" font-size="10" fill="#9ca3af">faster on loop-heavy code</text>
+  <text x="720" y="402" text-anchor="middle" font-size="11" fill="#374151">Higher (~36x overhead)</text>
+  <text x="720" y="416" text-anchor="middle" font-size="10" fill="#9ca3af">faster on tight loops only</text>
   <rect x="40" y="422" width="820" height="36" fill="#ffffff"/>
   <text x="50" y="444" font-size="12" fill="#111827">Output Format</text>
   <text x="440" y="444" text-anchor="middle" font-size="11" fill="#374151">luacov.stats.out</text>
@@ -65,7 +65,7 @@
   <text x="510" y="536" font-size="11" font-weight="600" fill="#16a34a">New approach: Per-instruction coverage</text>
   <text x="510" y="552" font-size="10" fill="#6b7280">Provides true per-PC branch coverage on Lua 5.4+.</text>
   <text x="510" y="566" font-size="10" fill="#6b7280">Compound conditions are fully measured.</text>
-  <text x="510" y="580" font-size="10" fill="#6b7280">Overhead comparable to C line hook; limited to Lua 5.4+.</text>
+  <text x="510" y="580" font-size="10" fill="#6b7280">Higher overhead than C line hook; limited to Lua 5.4+.</text>
   <text x="480" y="624" text-anchor="middle" font-size="11" font-weight="600" fill="#6b7280">Both approaches use deepbranches.c (static branch discovery) and deepactivelines.c (active line detection).</text>
   <text x="480" y="640" text-anchor="middle" font-size="10" fill="#9ca3af">The new approach replaces line-level hooking with instruction-level counting, enabling precise branch coverage.</text>
 </svg>

@@ -15,9 +15,10 @@ This document presents a quantitative comparison of four coverage-hook configura
 |---|---|
 | Lua version | Lua 5.5.0 |
 | CPU | Intel Xeon Platinum 8269CY @ 2.50 GHz |
-| Cores | 104 logical |
+| Cores | 104 logical (52 physical, 2 sockets, HT on) |
 | Memory | 16 GiB |
-| OS | Linux 5.10 |
+| OS | Linux 5.10 (x86_64) |
+| Compiler | GCC 13.3.0 |
 | Timing | `os.clock()` (process CPU time) |
 
 ## Methodology
@@ -62,11 +63,11 @@ Summary row: geometric mean of slowdown factors across the three workloads.
 ```
 Workload              baseline (ops/s)   luacov-hook           cluacov-hook          pchook
 ─────────────────────────────────────────────────────────────────────────────────────────────
-fib(24)               2.846e+02          1.622e+00 (175.5x)*   1.278e+01  (22.3x)    1.181e+01  (24.1x)
-loop×1 000           2.661e+07          9.273e+04 (287.0x)     8.029e+05  (33.1x)    1.567e+06  (17.0x)
-call-chain/100        4.128e+05          1.817e+03 (227.2x)     1.506e+04  (27.4x)    1.609e+04  (25.7x)
+fib(24)               2.851e+02          1.590e+00 (179.3x)*   1.195e+01  (23.9x)    7.141e+00  (39.9x)
+loop×1 000           2.671e+07          9.067e+04 (294.6x)    7.954e+05  (33.6x)    9.681e+05  (27.6x)
+call-chain/100        4.131e+05          1.776e+03 (232.6x)    1.485e+04  (27.8x)    9.674e+03  (42.7x)
 ─────────────────────────────────────────────────────────────────────────────────────────────
-geometric mean                                     225.3x                   27.2x               21.9x
+geometric mean                                     230.7x                   28.1x               36.1x
 ```
 
 `*` = slow cell; probe exceeded 4 s threshold; single rep only.
@@ -77,13 +78,13 @@ All fast cells (3 reps each) show low noise, confirming stable measurements:
 
 ```
 Workload              baseline              luacov-hook           cluacov-hook          pchook
-──────────────────────────────────────────────────────────────────────────────────────────────────────
-fib(24)               2.83e+02..2.87e+02   (1 rep, 6 s probe)   1.27e+01..1.28e+01   1.18e+01..1.18e+01
-                      (±1%)                                       (±0%)                (±0%)
-loop×1 000           2.660e+07..2.663e+07  9.20e+04..9.33e+04   8.02e+05..8.05e+05   1.56e+06..1.58e+06
-                      (±0%)                (±1%)                 (±0%)                (±1%)
-call-chain/100        4.12e+05..4.14e+05   1.81e+03..1.82e+03   1.50e+04..1.52e+04   1.56e+04..1.63e+04
-                      (±0%)                (±0%)                 (±1%)                (±2%)
+──────────────────────────────────────────────────────────────────────────────────────────────
+fib(24)               2.80e+02..2.89e+02   (1 rep, 6.2 s probe) 1.18e+01..1.21e+01   7.12e+00..7.16e+00
+                      (±2%)                                       (±1%)                (±0%)
+loop×1 000           2.67e+07..2.68e+07   9.04e+04..9.12e+04   7.93e+05..7.97e+05   9.67e+05..9.69e+05
+                      (±0%)                (±0%)                 (±0%)                (±0%)
+call-chain/100        4.13e+05..4.14e+05   1.76e+03..1.79e+03   1.48e+04..1.49e+04   9.65e+03..9.70e+03
+                      (±0%)                (±1%)                 (±0%)                (±0%)
 ```
 
 ### cluacov C hook vs pchook — head-to-head
@@ -91,11 +92,11 @@ call-chain/100        4.12e+05..4.14e+05   1.81e+03..1.82e+03   1.50e+04..1.52e+
 ```
 Workload              cluacov-hook    pchook      winner
 ────────────────────────────────────────────────────────
-fib(24)               22.3x           24.1x       cluacov-hook  (1.08×)
-loop×1 000           33.1x           17.0x       pchook        (1.95×)
-call-chain/100        27.4x           25.7x       pchook        (1.07×)
+fib(24)               23.9x           39.9x       cluacov-hook  (1.67x)
+loop×1 000           33.6x           27.6x       pchook        (1.22x)
+call-chain/100        27.8x           42.7x       cluacov-hook  (1.53x)
 ────────────────────────────────────────────────────────
-geometric mean                                    pchook        (1.24×)
+geometric mean                                    cluacov-hook  (1.28x)
 ```
 
 ## Analysis
@@ -111,7 +112,7 @@ invokes `debug.getinfo(level, "S")`.  This involves:
 - Returning to Lua, performing table lookups and string pattern matching
 
 Measured cost: roughly **3–5 µs per line event**.  On fib(24), which generates
-~185 000 line events per 10-call batch, this dominates completely (175–287×
+~185 000 line events per 10-call batch, this dominates completely (179–295×
 overhead range).
 
 ### Why the cluacov C hook is faster
@@ -122,12 +123,11 @@ resolve the current source filename, but does so without Lua bytecode
 interpretation.  Measured cost: **~400 ns per line event** — roughly 8× cheaper
 than the pure-Lua hook.
 
-### Why pchook is faster still, despite firing more often
+### Why pchook fires more often but has lower per-event cost
 
 `pchook.c` uses `LUA_MASKCOUNT` (count = 1), firing on **every bytecode
-instruction** — 3–7× more events than the line hook for the same code.  Yet it
-is **faster** overall (geometric mean 21.9× vs 27.2× for the C line hook)
-because each invocation is far cheaper:
+instruction** — 3–7× more events than the line hook for the same code.  Each
+invocation is far cheaper:
 
 - No `lua_getstack` / `lua_getinfo` call.
 - PC is read directly from `CallInfo.u.l.savedpc - proto->code` — a single
@@ -145,41 +145,26 @@ workload-dependent result:
 
 | Workload | Instruction / line ratio | Head-to-head |
 |---|---|---|
-| fib(24) — many recursive calls | ~7 instructions / line | cluacov-hook wins (1.08×) |
-| loop×1 000 — tight arithmetic | ~3 instructions / line | pchook wins (1.95×) |
-| call-chain/100 — moderate calls | ~3.5 instructions / line | pchook wins (1.07×) |
+| fib(24) — many recursive calls | ~7 instructions / line | cluacov-hook wins (1.67x) |
+| loop×1 000 — tight arithmetic | ~3 instructions / line | pchook wins (1.22x) |
+| call-chain/100 — moderate calls | ~3.5 instructions / line | cluacov-hook wins (1.53x) |
 
 When the instruction-to-line ratio is high (recursive code), the extra event
-volume of pchook can outweigh its per-call advantage.  For loops and typical
-application code the ratio is lower, and pchook wins.
+volume of pchook outweighs its per-call advantage.  For tight loops with low
+instruction-to-line ratios, pchook wins.
 
-The geometric mean across all three workloads is **pchook 1.24× faster** than
-the cluacov C line hook.
+The geometric mean across all three workloads is **cluacov-hook 1.28× faster**
+than pchook.  This result is consistent with other benchmarked machines
+(Xeon 8369B, Apple M4 Pro) where cluacov-hook also wins overall.
 
 ## Implications for documentation
 
-The `README.md` comparison table previously read:
-
-```
-| Performance | Moderate | Slower (fires every instruction) |
-```
-
-This was incorrect.  The benchmark shows:
-
-- **cluacov C hook**: 27.2× geometric mean slowdown.
-- **pchook**: 21.9× geometric mean slowdown — **faster**, not slower.
-
-The `getting-started.md` troubleshooting section previously read:
-
-> Per-instruction hooks fire on every VM instruction, which is significantly
-> slower than line-level hooks.
-
-This was also incorrect when "line-level hook" refers to the cluacov C hook.
-pchook is faster in two of three workloads and faster overall.  The statement
-is only true when comparing against the pure-Lua luacov hook (225× overhead),
-but that hook is not what users get when cluacov is installed.
-
-Both claims have been corrected in the documentation.
+Both C hooks are dramatically faster than the pure-Lua luacov hook on all
+tested machines (5–10× improvement).  The cluacov C line hook is faster overall
+in geometric mean on all tested machines, though pchook wins on tight-loop
+workloads.  The choice between the two should be guided primarily by **feature
+requirements** (pchook enables PC-level branch coverage) rather than performance
+alone.
 
 ## Caveats
 
@@ -188,7 +173,7 @@ Both claims have been corrected in the documentation.
   files.  Multi-file workloads add one-time `file_included` lookup overhead per
   new file (cached thereafter), which affects both line hooks equally and does
   not affect pchook.
-- **Single rep for luacov-hook × fib**: the probe took 6.14 s, exceeding the
+- **Single rep for luacov-hook × fib**: the probe took 6.2 s, exceeding the
   4 s threshold.  The single measurement is stable (fib is deterministic) but
   no variance estimate is available for this cell.
 - **No I/O overhead**: the mock runner does not call `save_stats()`.  Periodic
@@ -197,3 +182,6 @@ Both claims have been corrected in the documentation.
   vendored headers and is only available on PUC-Rio Lua 5.4+.  The cluacov C
   hook and luacov pure-Lua hook are available on all supported versions
   (5.1–5.5, LuaJIT).
+- **Shared-VM environment**: The Xeon 8269CY machine may be subject to
+  noisy-neighbor effects in a shared infrastructure, though the low variance
+  (±0–2%) suggests this was not significant during measurement.
