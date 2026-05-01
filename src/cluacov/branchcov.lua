@@ -9,7 +9,7 @@ function M.analyze(func)
 
    local hits_by_func = {}
    for _, entry in ipairs(all_hits) do
-      hits_by_func[entry.linedefined] = entry.hits
+      hits_by_func[entry.linedefined .. ":" .. entry.sizecode] = entry.hits
    end
 
    local result_branches = {}
@@ -17,7 +17,7 @@ function M.analyze(func)
    local hit = 0
 
    for _, branch in ipairs(branches) do
-      local proto_hits = hits_by_func[branch.linedefined] or {}
+      local proto_hits = hits_by_func[branch.linedefined .. ":" .. branch.sizecode] or {}
       local targets = {}
       local targets_hit = 0
 

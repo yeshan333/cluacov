@@ -145,6 +145,12 @@ static int l_get_all_hits(lua_State *L);
 static int l_start(lua_State *L) {
     int mask;
 
+    /* Clear stale snapshots from previous stop(). */
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+
     lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
@@ -158,6 +164,25 @@ static int l_start(lua_State *L) {
 
     if (!lua_isnoneornil(L, 1)) {
         luaL_checktype(L, 1, LUA_TTABLE);
+
+        /* Validate savestepsize. */
+        lua_getfield(L, 1, "savestepsize");
+        if (lua_isnil(L, -1) || lua_tointeger(L, -1) < 1) {
+            lua_pop(L, 1);
+            return luaL_error(L,
+                "tick config requires savestepsize >= 1");
+        }
+        lua_pop(L, 1);
+
+        /* Validate save_stats is a function. */
+        lua_getfield(L, 1, "save_stats");
+        if (!lua_isfunction(L, -1)) {
+            lua_pop(L, 1);
+            return luaL_error(L,
+                "tick config requires save_stats to be a function");
+        }
+        lua_pop(L, 1);
+
         /* Initialize steps counter if not set. */
         lua_getfield(L, 1, "steps");
         if (lua_isnil(L, -1)) {

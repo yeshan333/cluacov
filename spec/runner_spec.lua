@@ -161,13 +161,44 @@ return {
       end)
 
       it("does not create GC anchor when tick is true", function()
-         -- Verify that runner._anchor is not set when tick=true
-         local runner = require("cluacov.runner")
-         -- runner is already initialized at module load, check the tick field
-         -- (the runner.init() was called with default config, so tick=false)
-         -- We can only verify the config key exists
-         assert.is_not_nil(runner.config.tick, "tick should be in config")
-         assert.is_not_nil(runner.config.savestepsize, "savestepsize should be in config")
+         -- Run a subprocess with tick=true and verify _anchor is nil
+         local luacov_cfg = tmpdir .. (is_windows and "\\" or "/") .. ".luacov_anchor"
+         local cfg_fh = assert(io.open(luacov_cfg, "w"))
+         cfg_fh:write(string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   tick = true,
+   savestepsize = 100,
+}
+]], tmpdir .. (is_windows and "\\" or "/") .. "anchor_stats.out",
+   tmpdir .. (is_windows and "\\" or "/") .. "anchor_lcov.info"))
+         cfg_fh:close()
+
+         local check_script = tmpdir .. (is_windows and "\\" or "/") .. "check_anchor.lua"
+         local cs_fh = assert(io.open(check_script, "w"))
+         cs_fh:write([[
+local runner = require("cluacov.runner")
+io.write(runner._anchor and "HAS_ANCHOR" or "NO_ANCHOR")
+io.flush()
+]])
+         cs_fh:close()
+
+         local cmd
+         if is_windows then
+            cmd = string.format(
+               'set "LUACOV_CONFIG=%s" && lua "%s"',
+               luacov_cfg, check_script)
+         else
+            cmd = string.format(
+               'LUACOV_CONFIG=%s lua "%s"',
+               luacov_cfg, check_script)
+         end
+         local fh = io.popen(cmd)
+         local result = fh:read("*a")
+         fh:close()
+
+         assert.equal("NO_ANCHOR", result, "runner._anchor should be nil when tick=true")
       end)
    end
 end)

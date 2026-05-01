@@ -62,7 +62,10 @@ end
 
 local function resolve_path(filename)
    if filename:sub(1, 1) == "/" then return filename end
-   local pwd = io.popen("pwd"):read("*l")
+   local fh = io.popen("pwd")
+   if not fh then return filename end
+   local pwd = fh:read("*l")
+   fh:close()
    if not pwd then return filename end
    if filename:sub(1, 2) == "./" then
       filename = filename:sub(3)
@@ -169,13 +172,13 @@ local function write_lcov(config, all_line_hits, all_hits)
 
       local hits_by_ld = {}
       for _, entry in ipairs(proto_list) do
-         hits_by_ld[entry.linedefined] = entry.hits
+         hits_by_ld[entry.linedefined .. ":" .. entry.sizecode] = entry.hits
       end
 
       local block_id = 0
       local brf, brh = 0, 0
       for _, b in ipairs(branches) do
-         local proto_hits = hits_by_ld[b.linedefined] or {}
+         local proto_hits = hits_by_ld[b.linedefined .. ":" .. b.sizecode] or {}
          brf = brf + #b.targets
          for ti, t in ipairs(b.targets) do
             local taken = proto_hits[t.pc] or 0
