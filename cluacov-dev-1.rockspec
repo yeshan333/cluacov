@@ -39,7 +39,8 @@ build = {
       ["cluacov.version"] = "src/cluacov/version.lua",
       ["cluacov.branchfilter"] = "src/cluacov/branchfilter.lua",
       ["cluacov.pchook"] = "src/cluacov/pchook.c",
-      ["cluacov.branchcov"] = "src/cluacov/branchcov.lua"
+      ["cluacov.branchcov"] = "src/cluacov/branchcov.lua",
+      ["cluacov.runner"] = "src/cluacov/runner.lua"
    }
 }
 
