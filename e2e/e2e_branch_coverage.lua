@@ -1,9 +1,9 @@
 #!/usr/bin/env lua
 --
--- E2E branch coverage test:
---   1. Run sample code under luacov to collect line hits
---   2. Use deepbranches to discover branch sites
---   3. Cross-reference to compute branch coverage
+-- E2E branch coverage test (per-PC instruction-level):
+--   1. Load sample code, start PC-level hook
+--   2. Run test code under the hook
+--   3. Analyze branch coverage with branchcov
 --   4. Generate LCOV data with branch records
 --   5. Generate HTML report via genhtml
 --
@@ -18,159 +18,91 @@ end
 local e2e_dir = resolve_dir(arg[0]:match("(.-)[^/]*$") or "./")
 
 local output_dir  = e2e_dir .. "output"
-local stats_file  = output_dir .. "/luacov.stats.out"
 local lcov_file   = output_dir .. "/coverage.lcov"
 local html_dir    = output_dir .. "/html"
 local sample_file = e2e_dir .. "sample.lua"
+local run_test_file = e2e_dir .. "run_test.lua"
 
 os.execute("mkdir -p " .. output_dir)
 
--- Step 1: Run the test under luacov
+-- Step 1: Load sample, execute it, and start PC hook
 
-print("=== Step 1: Running test under luacov ===")
+print("=== Step 1: Loading sample and starting PC hook ===")
 
-local luacov_cfg = output_dir .. "/.luacov"
-local cfg_fh = assert(io.open(luacov_cfg, "w"))
-cfg_fh:write(string.format([[
-statsfile = %q
-include = { "sample$" }
-]], stats_file))
-cfg_fh:close()
+package.path = e2e_dir .. "?.lua;" .. package.path
 
-os.remove(stats_file)
+local sample_func = assert(loadfile(sample_file))
 
-local run_cmd = string.format(
-   "cd %s && LUACOV_CONFIG=%s lua -lluacov run_test.lua",
-   e2e_dir, luacov_cfg
-)
-local ok = os.execute(run_cmd)
-if not ok then
-   io.stderr:write("ERROR: test run failed\n")
-   os.exit(1)
+local pchook = require("cluacov.pchook")
+pchook.start()
+
+local sample_module = sample_func()
+package.loaded["sample"] = sample_module
+
+-- Step 2: Run the test (under PC hook)
+
+print("\n=== Step 2: Running test under PC hook ===")
+
+local run_func = assert(loadfile(run_test_file))
+run_func()
+
+pchook.stop()
+
+-- Step 3: Analyze branch coverage with branchcov
+
+print("\n=== Step 3: Analyzing branch coverage (per-PC) ===")
+
+local branchcov = require("cluacov.branchcov")
+local result = branchcov.analyze(sample_func)
+
+print(string.format("Discovered %d branch sites, %d branch targets, %d hit",
+   #result.branches, result.total, result.hit))
+
+local covered, partial, uncovered = 0, 0, 0
+for _, b in ipairs(result.branches) do
+   if b.status == "covered" then covered = covered + 1
+   elseif b.status == "partial" then partial = partial + 1
+   else uncovered = uncovered + 1 end
 end
 
--- Step 2: Load stats and discover branches
-
-print("\n=== Step 2: Loading stats and discovering branches ===")
-
-local stats_mod = require("luacov.stats")
-local data = stats_mod.load(stats_file)
-
-if not data then
-   io.stderr:write("ERROR: could not load stats from " .. stats_file .. "\n")
-   os.exit(1)
-end
-
-local sample_key
-for name, _ in pairs(data) do
-   if name:match("sample") then
-      sample_key = name
-      break
-   end
-end
-
-if not sample_key then
-   io.stderr:write("ERROR: no stats for sample.lua found\n")
-   for k in pairs(data) do
-      io.stderr:write("  found: " .. k .. "\n")
-   end
-   os.exit(1)
-end
-
-local file_stats = data[sample_key]
-print(string.format("Loaded stats for %s (max line: %d)", sample_key, file_stats.max))
-
--- Load sample.lua and get branches
-local sample_src = assert(io.open(sample_file)):read("*a")
-local sample_func = assert(load(sample_src, "@" .. sample_file))
-
-local deepbranches = require("cluacov.deepbranches")
-local branches = deepbranches.get(sample_func)
-
-print(string.format("Discovered %d branch sites", #branches))
-
--- Step 3: Filter branches and compute coverage
-
-print("\n=== Step 3: Filtering branches ===")
-
-local branchfilter = require("cluacov.branchfilter")
-local filtered, skipped = branchfilter.filter(branches)
-
-local branch_data = {}
-
-for _, branch in ipairs(filtered) do
-   local target_details = {}
-   local targets_hit = 0
-   for _, target in ipairs(branch.targets) do
-      local hits = file_stats[target.line] or 0
-      local hit = hits > 0
-      if hit then targets_hit = targets_hit + 1 end
-      target_details[#target_details + 1] = {
-         line = target.line, pc = target.pc, hits = hits, hit = hit,
-      }
-   end
-
-   local status
-   if targets_hit == #target_details then
-      status = "covered"
-   elseif targets_hit > 0 then
-      status = "partial"
-   else
-      status = "uncovered"
-   end
-
-   branch_data[#branch_data + 1] = {
-      line = branch.line, kind = branch.kind,
-      targets = target_details, status = status,
-   }
-end
-
-print(string.format("  %d raw branches, %d skipped, %d reportable",
-   #branches, skipped, #branch_data))
-
-for i, b in ipairs(branch_data) do
+for i, b in ipairs(result.branches) do
    print(string.format(
-      "  Branch #%d at line %d (%s): %s [targets: %s]",
-      i, b.line, b.kind, b.status,
+      "  Branch #%d at line %d (pc=%d, %s): %s [targets: %s]",
+      i, b.line, b.pc, b.kind, b.status,
       table.concat((function()
          local parts = {}
          for _, t in ipairs(b.targets) do
-            parts[#parts + 1] = string.format("L%d=%d", t.line, t.hits)
+            parts[#parts + 1] = string.format("pc%d(L%d)=%d", t.pc, t.line, t.hits)
          end
          return parts
       end)(), ", ")
    ))
 end
 
-local total_branches = #branch_data
-local covered, partial, uncovered = 0, 0, 0
-for _, b in ipairs(branch_data) do
-   if b.status == "covered" then covered = covered + 1
-   elseif b.status == "partial" then partial = partial + 1
-   else uncovered = uncovered + 1 end
-end
-
 print(string.format(
-   "\nBranch summary: %d reportable, %d covered, %d partial, %d uncovered (%.1f%%)",
-   total_branches, covered, partial, uncovered,
-   total_branches > 0 and (covered / total_branches * 100) or 0
-))
+   "\nBranch summary: %d sites, %d covered, %d partial, %d uncovered",
+   #result.branches, covered, partial, uncovered))
+print(string.format(
+   "Branch targets: %d total, %d hit (%.1f%%)",
+   result.total, result.hit,
+   result.total > 0 and (result.hit / result.total * 100) or 0))
 
 -- Step 4: Generate LCOV data
 
 print("\n=== Step 4: Generating LCOV data ===")
 
+local line_hits = branchcov.get_line_hits(sample_func)
+
 local lcov_fh = assert(io.open(lcov_file, "w"))
 lcov_fh:write("TN:cluacov-e2e\n")
 lcov_fh:write("SF:" .. sample_file .. "\n")
 
--- Line coverage: FN/FNDA/DA records
+-- Function records
 local source_lines = {}
 for line in io.lines(sample_file) do
    source_lines[#source_lines + 1] = line
 end
 
--- Discover functions from source for FN records
 local func_defs = {}
 for line_nr, line in ipairs(source_lines) do
    local fname = line:match("^function%s+%S-%.([%w_]+)")
@@ -188,22 +120,21 @@ lcov_fh:write(string.format("FNF:%d\n", #func_defs))
 
 local fns_hit = 0
 for _, fd in ipairs(func_defs) do
-   local hits = file_stats[fd.line] or 0
+   local hits = line_hits[fd.line] or 0
    lcov_fh:write(string.format("FNDA:%d,%s\n", hits, fd.name))
    if hits > 0 then fns_hit = fns_hit + 1 end
 end
 lcov_fh:write(string.format("FNH:%d\n", fns_hit))
 
--- Branch coverage: BRDA records (single-condition branches only)
--- Format: BRDA:line,block,branch,taken
+-- Branch coverage: BRDA records from per-PC analysis
 local branch_block_id = 0
 local branches_found = 0
 local branches_hit = 0
 
-for _, b in ipairs(branch_data) do
+for _, b in ipairs(result.branches) do
    branches_found = branches_found + #b.targets
    for target_idx, t in ipairs(b.targets) do
-      local taken = t.hits > 0 and t.hits or 0
+      local taken = t.hits
       lcov_fh:write(string.format("BRDA:%d,%d,%d,%s\n",
          b.line, branch_block_id, target_idx - 1,
          taken > 0 and tostring(taken) or "-"))
@@ -222,9 +153,9 @@ local lines_hit = 0
 local deepactivelines = require("cluacov.deepactivelines")
 local active_lines = deepactivelines.get(sample_func)
 
-for line_nr = 1, file_stats.max do
+for line_nr = 1, line_hits.max or 0 do
    if active_lines[line_nr] then
-      local hits = file_stats[line_nr] or 0
+      local hits = line_hits[line_nr] or 0
       lcov_fh:write(string.format("DA:%d,%d\n", line_nr, hits))
       lines_found = lines_found + 1
       if hits > 0 then lines_hit = lines_hit + 1 end
@@ -245,7 +176,7 @@ print("\n=== Step 5: Generating HTML report ===")
 os.execute("rm -rf " .. html_dir)
 
 local genhtml_cmd = string.format(
-   "genhtml %s --output-directory %s --title 'cluacov Branch Coverage E2E' "
+   "genhtml %s --output-directory %s --title 'cluacov Branch Coverage E2E (per-PC)' "
    .. "--legend --branch-coverage 2>&1",
    lcov_file, html_dir
 )
@@ -254,7 +185,6 @@ local genhtml_output = genhtml_result:read("*a")
 genhtml_result:close()
 print(genhtml_output)
 
--- Verify output exists
 local index_html = html_dir .. "/index.html"
 local fh = io.open(index_html, "r")
 if fh then
@@ -277,11 +207,24 @@ local function assert_eq(desc, got, expected)
    print(string.format("  OK: %s = %s", desc, tostring(got)))
 end
 
-assert_eq("reportable branches found", #branch_data > 0, true)
+assert_eq("branch sites found", #result.branches > 0, true)
 assert_eq("some branches partially covered", partial > 0, true)
 assert_eq("some branches fully covered", covered > 0, true)
-assert_eq("some branches uncovered", uncovered > 0, true)
-assert_eq("compound branches skipped", skipped > 0, true)
+assert_eq("branch targets > branch sites",
+   result.total > #result.branches, true)
 assert_eq("LCOV file exists", io.open(lcov_file) ~= nil, true)
+
+-- Verify compound conditions produce multiple branch sites
+local line_76_count = 0
+for _, b in ipairs(result.branches) do
+   if b.line == 76 then line_76_count = line_76_count + 1 end
+end
+assert_eq("any_truthy (or): 3 branch sites on line 76", line_76_count, 3)
+
+local line_84_count = 0
+for _, b in ipairs(result.branches) do
+   if b.line == 84 then line_84_count = line_84_count + 1 end
+end
+assert_eq("all_truthy (and): 3 branch sites on line 84", line_84_count, 3)
 
 print("\n=== E2E test PASSED ===")

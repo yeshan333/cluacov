@@ -37,7 +37,9 @@ build = {
       ["cluacov.deepactivelines"] = "src/cluacov/deepactivelines.c",
       ["cluacov.hook"] = "src/cluacov/hook.c",
       ["cluacov.version"] = "src/cluacov/version.lua",
-      ["cluacov.branchfilter"] = "src/cluacov/branchfilter.lua"
+      ["cluacov.branchfilter"] = "src/cluacov/branchfilter.lua",
+      ["cluacov.pchook"] = "src/cluacov/pchook.c",
+      ["cluacov.branchcov"] = "src/cluacov/branchcov.lua"
    }
 }
 

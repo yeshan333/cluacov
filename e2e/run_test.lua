@@ -25,8 +25,9 @@ assert(sample.fizzbuzz(9) == "fizz")
 
 -- Skip max_of_three entirely (no calls)
 
--- Exercise any_truthy: only first arg true (short-circuits, b/c never evaluated)
+-- Exercise any_truthy: first call short-circuits on a; second evaluates b
 assert(sample.any_truthy(true, nil, nil) == "yes")
+assert(sample.any_truthy(nil, true, nil) == "yes")
 
 -- Exercise all_truthy: first two true, third false (partial short-circuit)
 assert(sample.all_truthy(true, true, false) == "not all")

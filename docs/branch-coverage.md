@@ -186,11 +186,93 @@ This script:
 
 ## Platform Support
 
-| Platform | Branch analysis | Notes |
-|----------|----------------|-------|
-| PUC-Rio Lua 5.1 | Yes | `OP_TFORLOOP` followed by `OP_JMP` |
-| PUC-Rio Lua 5.2 | Yes | `OP_TFORLOOP` uses `sBx` |
-| PUC-Rio Lua 5.3 | Yes | Same as 5.2 |
-| PUC-Rio Lua 5.4 | Yes | `OP_FORPREP` conditional, `sJ` format jumps |
-| PUC-Rio Lua 5.5 | Yes | Same as 5.4 |
-| LuaJIT | No | Returns empty table (bytecode format differs) |
+| Platform | Branch analysis | Per-PC hook | Notes |
+|----------|----------------|-------------|-------|
+| PUC-Rio Lua 5.1 | Yes | No | `OP_TFORLOOP` followed by `OP_JMP` |
+| PUC-Rio Lua 5.2 | Yes | No | `OP_TFORLOOP` uses `sBx` |
+| PUC-Rio Lua 5.3 | Yes | No | Same as 5.2 |
+| PUC-Rio Lua 5.4 | Yes | Yes | `OP_FORPREP` conditional, `sJ` format jumps |
+| PUC-Rio Lua 5.5 | Yes | Yes | Same as 5.4 |
+| LuaJIT | No | No | Returns empty table (bytecode format differs) |
+
+## Per-PC Branch Coverage (`cluacov.pchook` + `cluacov.branchcov`)
+
+The line-hit-based approach above treats same-line branches as indistinguishable
+(since Lua's debug hook fires per line, not per instruction). For **true
+instruction-level branch coverage**, cluacov provides a C-level count hook that
+records execution counts for every bytecode instruction (per-PC hit counting).
+
+### Why per-PC?
+
+Consider `if a or b or c then`. This compiles to 3 separate `TEST` instructions.
+With line-hit data, all 3 share the same hit count — you can't tell which
+sub-conditions were evaluated. With per-PC counting, each `TEST` and its targets
+get independent hit counts, giving 6 branch targets instead of 2.
+
+### `cluacov.pchook` API
+
+```lua
+local pchook = require("cluacov.pchook")
+
+pchook.start()                     -- register instruction-level C hook
+-- ... run code under test ...
+pchook.stop()                      -- remove hook
+
+local hits = pchook.get_hits(func) -- per-proto PC hit tables
+pchook.reset()                     -- clear all recorded data
+```
+
+`pchook.start()` calls `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` to fire a
+C-level callback on every VM instruction. The callback records the 1-based
+program counter of each executed instruction, keyed by `Proto*` pointer.
+
+`pchook.get_hits(func)` walks the function's Proto tree (including nested
+functions) and returns an array of entries:
+
+```lua
+{
+    { linedefined = 0, sizecode = 42, hits = { [1] = 5, [3] = 2, ... } },
+    { linedefined = 8, sizecode = 10, hits = { [2] = 3, ... } },
+    ...
+}
+```
+
+Each entry's `hits` table maps 1-based PC to execution count.
+
+> **Performance note:** instruction-level hooks fire on every VM instruction,
+> which is significantly slower than line-level hooks. Use `pchook` for coverage
+> analysis, not production monitoring.
+
+### `cluacov.branchcov` API
+
+```lua
+local branchcov = require("cluacov.branchcov")
+
+local result = branchcov.analyze(func)
+-- result.branches: array of branch info with per-target hit counts
+-- result.total: total branch targets (branch_count * 2)
+-- result.hit: number of targets with hits > 0
+```
+
+`analyze` combines `deepbranches.get(func)` with `pchook.get_hits(func)` to
+compute per-instruction branch coverage. Each branch's targets have independent
+`hits` counts from the PC-level data.
+
+Unlike the line-hit approach, **no filtering is needed** — every branch
+instruction is individually measurable.
+
+### Shared target PCs
+
+Multiple branch instructions may share a target PC (e.g., all `TEST`s in
+`a or b or c` target the same body instruction). When the body is reached
+from any path, that target PC shows as "hit" for **all** branches sharing it.
+This is instruction-coverage (was this PC executed?), not edge-coverage
+(which branch led here?).
+
+### Requirements
+
+- **Lua 5.4+** required (accesses `CallInfo.u.l.savedpc` via vendored headers)
+- The function passed to `get_hits` must be the **same object** that was
+  executed under `pchook.start()` (same `Proto*` pointer)
+- Lua 5.1–5.3: `pchook.start()` raises an error; `get_hits()` returns empty
+- LuaJIT: same as 5.1–5.3

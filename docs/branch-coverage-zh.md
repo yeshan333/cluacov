@@ -173,11 +173,88 @@ lua e2e/e2e_branch_coverage.lua
 
 ## 平台支持
 
-| 平台 | 分支分析 | 备注 |
-|------|---------|------|
-| PUC-Rio Lua 5.1 | 支持 | `OP_TFORLOOP` 后跟 `OP_JMP` |
-| PUC-Rio Lua 5.2 | 支持 | `OP_TFORLOOP` 使用 `sBx` |
-| PUC-Rio Lua 5.3 | 支持 | 同 5.2 |
-| PUC-Rio Lua 5.4 | 支持 | `OP_FORPREP` 条件化，`sJ` 格式跳转 |
-| PUC-Rio Lua 5.5 | 支持 | 同 5.4 |
-| LuaJIT | 不支持 | 返回空表（字节码格式不同） |
+| 平台 | 分支分析 | 指令级 hook | 备注 |
+|------|---------|-------------|------|
+| PUC-Rio Lua 5.1 | 支持 | 不支持 | `OP_TFORLOOP` 后跟 `OP_JMP` |
+| PUC-Rio Lua 5.2 | 支持 | 不支持 | `OP_TFORLOOP` 使用 `sBx` |
+| PUC-Rio Lua 5.3 | 支持 | 不支持 | 同 5.2 |
+| PUC-Rio Lua 5.4 | 支持 | 支持 | `OP_FORPREP` 条件化，`sJ` 格式跳转 |
+| PUC-Rio Lua 5.5 | 支持 | 支持 | 同 5.4 |
+| LuaJIT | 不支持 | 不支持 | 返回空表（字节码格式不同） |
+
+## 指令级分支覆盖率（`cluacov.pchook` + `cluacov.branchcov`）
+
+上述基于行命中的方法将同一行的多个分支视为不可区分（因为 Lua 调试钩子按行触发，
+而非按指令触发）。为了实现**真正的指令级分支覆盖率**，cluacov 提供了 C 级别的
+计数钩子，可以记录每条字节码指令的执行次数（per-PC 命中计数）。
+
+### 为什么需要 per-PC？
+
+考虑 `if a or b or c then`。这会编译为 3 条独立的 `TEST` 指令。
+使用行命中数据时，3 条指令共享同一个命中计数——无法判断哪些子条件被求值。
+使用 per-PC 计数时，每个 `TEST` 及其目标都有独立的命中计数，
+分支目标数从 2 变为 6。
+
+### `cluacov.pchook` API
+
+```lua
+local pchook = require("cluacov.pchook")
+
+pchook.start()                     -- 注册指令级 C hook
+-- ... 运行被测代码 ...
+pchook.stop()                      -- 移除 hook
+
+local hits = pchook.get_hits(func) -- 按 Proto 返回 PC 命中表
+pchook.reset()                     -- 清空所有记录数据
+```
+
+`pchook.start()` 调用 `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` 在每条 VM
+指令执行时触发 C 级别回调。回调记录每条指令的 1-based 程序计数器，
+以 `Proto*` 指针为键。
+
+`pchook.get_hits(func)` 遍历函数的 Proto 树（包括嵌套函数），
+返回一个条目数组：
+
+```lua
+{
+    { linedefined = 0, sizecode = 42, hits = { [1] = 5, [3] = 2, ... } },
+    { linedefined = 8, sizecode = 10, hits = { [2] = 3, ... } },
+    ...
+}
+```
+
+每个条目的 `hits` 表将 1-based PC 映射到执行次数。
+
+> **性能提示：** 指令级钩子在每条 VM 指令上触发，比行级钩子显著更慢。
+> 请将 `pchook` 用于覆盖率分析，而非生产监控。
+
+### `cluacov.branchcov` API
+
+```lua
+local branchcov = require("cluacov.branchcov")
+
+local result = branchcov.analyze(func)
+-- result.branches: 分支信息数组，每个目标有独立的命中计数
+-- result.total: 分支目标总数（分支数 × 2）
+-- result.hit: 命中次数 > 0 的目标数
+```
+
+`analyze` 组合 `deepbranches.get(func)` 和 `pchook.get_hits(func)` 来计算
+指令级分支覆盖率。每个分支的目标都有来自 PC 级数据的独立 `hits` 计数。
+
+与行命中方法不同，**不需要过滤**——每条分支指令都是可独立度量的。
+
+### 共享目标 PC
+
+多条分支指令可能共享同一个目标 PC（例如 `a or b or c` 中所有 `TEST`
+都指向同一个函数体指令）。当函数体从任意路径到达时，该目标 PC 对**所有**
+共享它的分支都显示为"已命中"。这是指令覆盖率（该 PC 是否被执行过？），
+而非边覆盖率（从哪条分支到达？）。
+
+### 要求
+
+- 需要 **Lua 5.4+**（通过 vendored 头文件访问 `CallInfo.u.l.savedpc`）
+- 传给 `get_hits` 的函数必须是在 `pchook.start()` 下**实际执行**的同一对象
+  （相同的 `Proto*` 指针）
+- Lua 5.1–5.3：`pchook.start()` 会报错；`get_hits()` 返回空表
+- LuaJIT：同 5.1–5.3
