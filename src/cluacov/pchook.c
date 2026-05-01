@@ -264,6 +264,8 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
 
 static int l_get_all_line_hits(lua_State *L);
 static int l_get_all_hits(lua_State *L);
+static void aggregate_all_hits(lua_State *L, int result_idx);
+static void aggregate_all_line_hits(lua_State *L, int result_idx);
 
 static int l_start(lua_State *L) {
     int mask;
