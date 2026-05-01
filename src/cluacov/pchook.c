@@ -27,7 +27,12 @@
  *                           linedefined  = integer,
  *                           sizecode     = integer,
  *                           lines        = { [pc] = line, ... }, -- 0-based pc
- *                           hits         = { [pc1based] = count, ... } }
+ *                           hits         = { [pc] = count, ... } } -- 0-based pc
+ *
+ *                       NOTE: PC keys are 0-based, matching the historical
+ *                       wire format used by deepbranches and branchcov.
+ *                       Do NOT change to 1-based without auditing every
+ *                       reader (cluacov.branchcov, runner.lua, tests).
  *                       After build, this table no longer references any
  *                       Proto* pointer, so it remains safe to read even
  *                       inside __gc finalizers.
@@ -105,8 +110,8 @@ static const char *get_source_name(const Proto *proto) {
  *   { source       = string,    -- copy of getstr(proto->source) (or "?")
  *     linedefined  = integer,
  *     sizecode     = integer,
- *     lines        = { [pc1based] = line, ... },  -- pre-resolved PC->line
- *     hits         = {},                          -- to be populated by hook
+ *     lines        = { [pc] = line, ... },  -- pre-resolved 0-based PC -> line
+ *     hits         = {},                    -- 0-based PC -> count, populated by hook
  *   }
  *
  * After this call, the entry table holds NO Proto* references and is therefore
@@ -133,13 +138,14 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
     lua_pushinteger(L, proto->sizecode);
     lua_setfield(L, -2, "sizecode");
 
-    /* Pre-resolve PC -> line. Use 1-based PC keys to match the hits table. */
+    /* Pre-resolve PC -> line. PC keys are 0-based to match deepbranches /
+       branchcov, which key off the raw bytecode PC. */
     lua_createtable(L, proto->sizecode, 0);
     for (pc = 0; pc < proto->sizecode; pc++) {
         int line = get_pc_line(proto, pc);
         if (line > 0) {
             lua_pushinteger(L, line);
-            lua_rawseti(L, -2, pc + 1);
+            lua_rawseti(L, -2, pc);
         }
     }
     lua_setfield(L, -2, "lines");
@@ -246,12 +252,12 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
         return;
     }
 
-    /* Stack top: hits subtable. Use 1-based PC to match 'lines' table. */
-    lua_rawgeti(L, -1, pc + 1);
+    /* Stack top: hits subtable. 0-based PC keys match deepbranches/branchcov. */
+    lua_rawgeti(L, -1, pc);
     count = lua_tointeger(L, -1) + 1;
     lua_pop(L, 1);
     lua_pushinteger(L, count);
-    lua_rawseti(L, -2, pc + 1);
+    lua_rawseti(L, -2, pc);
 
     lua_pop(L, 1);
 }
@@ -331,18 +337,39 @@ static int l_start(lua_State *L) {
 }
 
 static int l_stop(lua_State *L) {
-    /* Drop the hook first so no further pc_hook callback can fire. We can
-       (and must) leave PCHOOK_KEY/PROTO_INDEX_KEY intact: the entries are
-       fully materialized Lua data and no longer reference Proto*, so they
-       can be safely consulted by get_all_*_hits even from a __gc context. */
+    int result_idx;
+
+    /* Drop the hook first so no further pc_hook callback can fire. After
+       this, PCHOOK entries are guaranteed to be immutable. */
     lua_sethook(L, NULL, 0, 0);
 
-    /* PROTO_INDEX_KEY uses Proto* lightuserdata as keys; once the hook is
-       removed there is no further need to keep the lookup, and Proto* may
-       become dangling at any point afterwards. Drop it now to make sure the
-       remainder of the program never reads those pointers again. */
-    lua_pushnil(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+    /* Pre-build snapshots while we still hold the GIL on a healthy state
+       (i.e. before any __gc finalizer might run). l_get_all_* will then
+       serve these in O(1) — that path is what runs during lua_close /
+       luaC_freeallobjects. */
+
+    /* SNAPSHOT_ALL_HITS_KEY */
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+    aggregate_all_hits(L, result_idx);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+
+    /* SNAPSHOT_LINE_HITS_KEY */
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+    aggregate_all_line_hits(L, result_idx);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+
+    /* IMPORTANT: do NOT drop PROTO_INDEX_KEY here. l_get_hits /
+       l_get_line_hits accept a Lua function argument; while that function
+       is alive (caller holds a reference) the corresponding Proto* is
+       guaranteed to remain valid, and we still need PROTO_INDEX_KEY to
+       map it back to the entry id.
+       PROTO_INDEX_KEY is reset by l_start (every fresh run) and by
+       l_reset (explicit teardown). The shutdown-safety property relied
+       on by GC finalizers comes entirely from PCHOOK_KEY entries being
+       pure Lua data — they never touch Proto* and are read by
+       l_get_all_*. */
 
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
@@ -496,15 +523,16 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx) {
         max_line = (int)lua_tointeger(L, -1);
         lua_pop(L, 1);
 
-        /* Walk entry.lines (1-based pc -> line) to mark active lines as 0. */
+        /* Walk entry.lines (0-based pc -> line) to mark active lines as 0.
+           lua_rawlen on a 0-keyed array reports n only for keys 1..n, so we
+           iterate via lua_next to cover the full sparse range including pc=0. */
         lua_getfield(L, entry_idx, "lines");
         lines_idx = lua_gettop(L);
-        lines_len = (int)lua_rawlen(L, lines_idx);
-        for (j = 1; j <= lines_len; j++) {
-            int line;
-            lua_rawgeti(L, lines_idx, j);
-            line = (int)lua_tointeger(L, -1);
-            lua_pop(L, 1);
+        (void)lines_len;  /* unused: switched to lua_next-based iteration */
+        lua_pushnil(L);
+        while (lua_next(L, lines_idx) != 0) {
+            int line = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);  /* value */
             if (line <= 0) continue;
 
             lua_rawgeti(L, file_idx, line);
@@ -518,18 +546,18 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx) {
             if (line > max_line) max_line = line;
         }
 
-        /* Walk entry.hits (1-based pc -> count). */
+        /* Walk entry.hits (0-based pc -> count). */
         lua_getfield(L, entry_idx, "hits");
         hits_idx = lua_gettop(L);
         lua_pushnil(L);
         while (lua_next(L, hits_idx) != 0) {
-            int pc1based = (int)lua_tointeger(L, -2);
+            int pc = (int)lua_tointeger(L, -2);
             lua_Integer count = lua_tointeger(L, -1);
             int line;
             lua_pop(L, 1);  /* value */
 
-            /* line = entry.lines[pc1based] */
-            lua_rawgeti(L, lines_idx, pc1based);
+            /* line = entry.lines[pc] */
+            lua_rawgeti(L, lines_idx, pc);
             line = (int)lua_tointeger(L, -1);
             lua_pop(L, 1);
             if (line <= 0) continue;
@@ -556,6 +584,20 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx) {
     lua_pop(L, 1);  /* PCHOOK_KEY */
 }
 
+/*
+ * NOTE on the SNAPSHOT_*_KEY caches:
+ *
+ * The PCHOOK_KEY entries are mutated in place by pc_hook every time the
+ * coverage hook fires. Therefore we MUST NOT serve a cached snapshot while
+ * the hook is still active (e.g. tick mode calls save_stats periodically
+ * from inside the running process). Doing so would freeze coverage at the
+ * value observed during the very first save_stats call.
+ *
+ * The cache is only populated by l_stop (after lua_sethook(NULL)), and is
+ * also invalidated by l_start / l_reset. From that point on the underlying
+ * data is immutable, so reads from __gc finalizers can be served instantly
+ * without re-aggregation.
+ */
 static int l_get_all_hits(lua_State *L) {
     int result_idx;
 
@@ -565,11 +607,7 @@ static int l_get_all_hits(lua_State *L) {
 
     lua_newtable(L);
     result_idx = lua_gettop(L);
-
     aggregate_all_hits(L, result_idx);
-
-    lua_pushvalue(L, result_idx);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
     return 1;
 }
 
@@ -582,11 +620,7 @@ static int l_get_all_line_hits(lua_State *L) {
 
     lua_newtable(L);
     result_idx = lua_gettop(L);
-
     aggregate_all_line_hits(L, result_idx);
-
-    lua_pushvalue(L, result_idx);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
     return 1;
 }
 
