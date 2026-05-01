@@ -90,24 +90,15 @@ local branches = deepbranches.get(sample_func)
 print(string.format("Discovered %d branch sites", #branches))
 
 -- Step 3: Filter branches and compute coverage
---
--- Lua's debug hook fires per-LINE, not per-instruction. For multi-branch
--- lines (compound conditions, loop entry+backedge), we only report branches
--- whose BOTH targets are on different lines (genuinely distinguishable),
--- and deduplicate by target-line pair to avoid redundant entries.
 
 print("\n=== Step 3: Filtering branches ===")
 
-local line_counts = {}
-for _, branch in ipairs(branches) do
-   line_counts[branch.line] = (line_counts[branch.line] or 0) + 1
-end
+local branchfilter = require("cluacov.branchfilter")
+local filtered, skipped = branchfilter.filter(branches)
 
 local branch_data = {}
-local skipped = 0
-local seen_target_pairs = {}
 
-local function add_branch(branch)
+for _, branch in ipairs(filtered) do
    local target_details = {}
    local targets_hit = 0
    for _, target in ipairs(branch.targets) do
@@ -132,26 +123,6 @@ local function add_branch(branch)
       line = branch.line, kind = branch.kind,
       targets = target_details, status = status,
    }
-end
-
-for _, branch in ipairs(branches) do
-   if line_counts[branch.line] == 1 then
-      add_branch(branch)
-   else
-      local t1 = branch.targets[1].line
-      local t2 = branch.targets[2].line
-      if t1 ~= branch.line and t2 ~= branch.line then
-         local key = branch.line .. ":" .. t1 .. ":" .. t2
-         if not seen_target_pairs[key] then
-            seen_target_pairs[key] = true
-            add_branch(branch)
-         else
-            skipped = skipped + 1
-         end
-      else
-         skipped = skipped + 1
-      end
-   end
 end
 
 print(string.format("  %d raw branches, %d skipped, %d reportable",

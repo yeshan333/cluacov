@@ -87,6 +87,10 @@ describe("deepbranches", function()
       end)
    end)
 
+   -- NOTE: targets are sorted by PC (ascending), NOT by semantic direction
+   -- (true-path / false-path). This is stable and sufficient for coverage,
+   -- but targets[1] does not necessarily mean "true branch".
+
    describe("get", function()
       it("throws error if the argument is not a function", function()
          assert.error(function() deepbranches.get(5) end)

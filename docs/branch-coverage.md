@@ -19,6 +19,10 @@ branch records (`BRDA`).
 
 Each branch site has exactly **two targets**: the two possible execution paths.
 
+> **Note:** targets are sorted by program counter (ascending), not by semantic
+> direction. `targets[1]` is the lower-PC target, not necessarily the
+> "true-path". This is stable and sufficient for coverage computation.
+
 ## API
 
 ```lua
