@@ -25,4 +25,13 @@ assert(sample.fizzbuzz(9) == "fizz")
 
 -- Skip max_of_three entirely (no calls)
 
+-- Exercise any_truthy: only first arg true (short-circuits, b/c never evaluated)
+assert(sample.any_truthy(true, nil, nil) == "yes")
+
+-- Exercise all_truthy: first two true, third false (partial short-circuit)
+assert(sample.all_truthy(true, true, false) == "not all")
+
+-- Exercise mixed_logic: only x>0 and y>0 path
+assert(sample.mixed_logic(5, 3) == "match")
+
 print("E2E test passed")

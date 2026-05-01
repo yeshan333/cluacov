@@ -89,51 +89,108 @@ local branches = deepbranches.get(sample_func)
 
 print(string.format("Discovered %d branch sites", #branches))
 
--- Step 3: Compute branch coverage
+-- Step 3: Merge same-line branches into decisions and compute coverage
+--
+-- Lua's debug hook fires per-LINE, not per-instruction. When a single source
+-- line contains multiple TEST instructions (e.g. `if a or b or c`), all
+-- share the same line-hit count, making per-instruction coverage impossible.
+--
+-- Fix: group branches by source line into "decisions". For compound conditions
+-- (multiple branches on one line), only track targets on DIFFERENT lines —
+-- these are the actual observable outcomes (then-body vs else-body).
 
-print("\n=== Step 3: Computing branch coverage ===")
+print("\n=== Step 3: Merging branches into decisions ===")
 
-local branch_data = {}
+local line_groups = {}
+local line_order = {}
+for _, branch in ipairs(branches) do
+   if not line_groups[branch.line] then
+      line_groups[branch.line] = {}
+      line_order[#line_order + 1] = branch.line
+   end
+   local group = line_groups[branch.line]
+   group[#group + 1] = branch
+end
 
-for i, branch in ipairs(branches) do
-   local targets_hit = 0
-   local target_details = {}
+local decisions = {}
 
-   for _, target in ipairs(branch.targets) do
-      local hits = file_stats[target.line] or 0
-      local hit = hits > 0
-      if hit then targets_hit = targets_hit + 1 end
-      target_details[#target_details + 1] = {
-         line = target.line,
-         pc = target.pc,
-         hits = hits,
-         hit = hit,
+for _, line_nr in ipairs(line_order) do
+   local group = line_groups[line_nr]
+
+   if #group == 1 then
+      local branch = group[1]
+      local target_details = {}
+      local targets_hit = 0
+      for _, target in ipairs(branch.targets) do
+         local hits = file_stats[target.line] or 0
+         local hit = hits > 0
+         if hit then targets_hit = targets_hit + 1 end
+         target_details[#target_details + 1] = {
+            line = target.line, pc = target.pc, hits = hits, hit = hit,
+         }
+      end
+
+      local status
+      if targets_hit == #target_details then
+         status = "covered"
+      elseif targets_hit > 0 then
+         status = "partial"
+      else
+         status = "uncovered"
+      end
+
+      decisions[#decisions + 1] = {
+         line = line_nr, kind = branch.kind,
+         branch_count = 1, targets = target_details, status = status,
+      }
+   else
+      local seen_lines = {}
+      local off_targets = {}
+      for _, branch in ipairs(group) do
+         for _, target in ipairs(branch.targets) do
+            if target.line ~= line_nr and not seen_lines[target.line] then
+               seen_lines[target.line] = true
+               local hits = file_stats[target.line] or 0
+               off_targets[#off_targets + 1] = {
+                  line = target.line, pc = target.pc,
+                  hits = hits, hit = hits > 0,
+               }
+            end
+         end
+      end
+
+      table.sort(off_targets, function(a, b) return a.line < b.line end)
+
+      local targets_hit = 0
+      for _, t in ipairs(off_targets) do
+         if t.hit then targets_hit = targets_hit + 1 end
+      end
+
+      local status
+      if targets_hit == #off_targets then
+         status = "covered"
+      elseif targets_hit > 0 then
+         status = "partial"
+      else
+         status = "uncovered"
+      end
+
+      decisions[#decisions + 1] = {
+         line = line_nr, kind = "decision",
+         branch_count = #group, targets = off_targets, status = status,
       }
    end
+end
 
-   local status
-   if targets_hit == #branch.targets then
-      status = "covered"
-   elseif targets_hit > 0 then
-      status = "partial"
-   else
-      status = "uncovered"
-   end
-
-   branch_data[i] = {
-      line = branch.line,
-      pc = branch.pc,
-      kind = branch.kind,
-      targets = target_details,
-      status = status,
-   }
-
+for i, d in ipairs(decisions) do
    print(string.format(
-      "  Branch #%d at line %d (%s): %s [targets: %s]",
-      i, branch.line, branch.kind, status,
+      "  Decision #%d at line %d (%s, %d branch%s): %s [targets: %s]",
+      i, d.line, d.kind, d.branch_count,
+      d.branch_count > 1 and "es" or "",
+      d.status,
       table.concat((function()
          local parts = {}
-         for _, t in ipairs(target_details) do
+         for _, t in ipairs(d.targets) do
             parts[#parts + 1] = string.format("L%d=%d", t.line, t.hits)
          end
          return parts
@@ -141,19 +198,18 @@ for i, branch in ipairs(branches) do
    ))
 end
 
--- Summarize
-local total_branches = #branch_data
+local total_decisions = #decisions
 local covered, partial, uncovered = 0, 0, 0
-for _, b in ipairs(branch_data) do
-   if b.status == "covered" then covered = covered + 1
-   elseif b.status == "partial" then partial = partial + 1
+for _, d in ipairs(decisions) do
+   if d.status == "covered" then covered = covered + 1
+   elseif d.status == "partial" then partial = partial + 1
    else uncovered = uncovered + 1 end
 end
 
 print(string.format(
-   "\nBranch summary: %d total, %d covered, %d partial, %d uncovered (%.1f%%)",
-   total_branches, covered, partial, uncovered,
-   total_branches > 0 and (covered / total_branches * 100) or 0
+   "\nDecision summary: %d decisions (%d raw branches), %d covered, %d partial, %d uncovered (%.1f%%)",
+   total_decisions, #branches, covered, partial, uncovered,
+   total_decisions > 0 and (covered / total_decisions * 100) or 0
 ))
 
 -- Step 4: Generate LCOV data
@@ -194,22 +250,22 @@ for _, fd in ipairs(func_defs) do
 end
 lcov_fh:write(string.format("FNH:%d\n", fns_hit))
 
--- Branch coverage: BRDA records
+-- Branch coverage: BRDA records (decision-level)
 -- Format: BRDA:line,block,branch,taken
-local branch_block_id = 0
+local decision_block_id = 0
 local branches_found = 0
 local branches_hit = 0
 
-for _, b in ipairs(branch_data) do
-   branches_found = branches_found + #b.targets
-   for target_idx, t in ipairs(b.targets) do
+for _, d in ipairs(decisions) do
+   branches_found = branches_found + #d.targets
+   for target_idx, t in ipairs(d.targets) do
       local taken = t.hits > 0 and t.hits or 0
       lcov_fh:write(string.format("BRDA:%d,%d,%d,%s\n",
-         b.line, branch_block_id, target_idx - 1,
+         d.line, decision_block_id, target_idx - 1,
          taken > 0 and tostring(taken) or "-"))
       if taken > 0 then branches_hit = branches_hit + 1 end
    end
-   branch_block_id = branch_block_id + 1
+   decision_block_id = decision_block_id + 1
 end
 
 lcov_fh:write(string.format("BRF:%d\n", branches_found))
@@ -277,10 +333,10 @@ local function assert_eq(desc, got, expected)
    print(string.format("  OK: %s = %s", desc, tostring(got)))
 end
 
-assert_eq("branch sites discovered", #branch_data > 0, true)
-assert_eq("some branches partially covered", partial > 0, true)
-assert_eq("some branches fully covered", covered > 0, true)
-assert_eq("some branches uncovered", uncovered > 0, true)
+assert_eq("decisions discovered", #decisions > 0, true)
+assert_eq("some decisions partially covered", partial > 0, true)
+assert_eq("some decisions fully covered", covered > 0, true)
+assert_eq("some decisions uncovered", uncovered > 0, true)
 assert_eq("LCOV file exists", io.open(lcov_file) ~= nil, true)
 
 print("\n=== E2E test PASSED ===")

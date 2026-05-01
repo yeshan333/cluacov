@@ -72,4 +72,28 @@ function M.max_of_three(a, b, c)
    end
 end
 
+function M.any_truthy(a, b, c)
+   if a or b or c then
+      return "yes"
+   else
+      return "no"
+   end
+end
+
+function M.all_truthy(a, b, c)
+   if a and b and c then
+      return "all"
+   else
+      return "not all"
+   end
+end
+
+function M.mixed_logic(x, y)
+   if (x > 0 and y > 0) or (x < -10) then
+      return "match"
+   else
+      return "no match"
+   end
+end
+
 return M

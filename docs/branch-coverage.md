@@ -89,26 +89,68 @@ The approach is:
 
 1. **Discover** branch sites with `deepbranches.get(func)`
 2. **Run** the code under LuaCov to collect per-line hit counts
-3. **Cross-reference**: for each branch site, check if its target lines were hit
+3. **Merge** same-line branches into decisions (see below)
+4. **Cross-reference**: for each decision, check if its outcome lines were hit
+
+### Compound Conditions and Decision-Level Merging
+
+Lua's debug hook fires at **line** level, not instruction level. When a single
+source line contains multiple TEST instructions (e.g. `if a or b or c`),
+`deepbranches.get` correctly returns 3 branch sites — but all share the same
+line-hit count, so per-instruction coverage is impossible.
+
+**Solution**: merge same-line branches into a single **decision**. For compound
+conditions, only track targets on **different lines** from the branch line —
+these are the actual observable outcomes (then-body vs else-body).
+
+```
+if a or b or c then   -- 3 branch sites, all on this line
+   print("yes")       -- outcome 1 (off-line target)
+else
+   print("no")        -- outcome 2 (off-line target)
+end
+```
+
+The merging algorithm:
+- **Single branch on a line**: use both targets as-is (standard coverage)
+- **Multiple branches on a line**: collect all target lines ≠ branch line,
+  deduplicate → these become the decision's outcomes
 
 ```lua
+-- Group branches by source line
+local line_groups = {}
 for _, branch in ipairs(branches) do
-   local targets_hit = 0
-   for _, target in ipairs(branch.targets) do
-      if (line_hits[target.line] or 0) > 0 then
-         targets_hit = targets_hit + 1
-      end
-   end
+   line_groups[branch.line] = line_groups[branch.line] or {}
+   table.insert(line_groups[branch.line], branch)
+end
 
-   if targets_hit == 2 then
-      -- "covered": both paths exercised
-   elseif targets_hit == 1 then
-      -- "partial": only one path exercised
+for line_nr, group in pairs(line_groups) do
+   if #group == 1 then
+      -- Simple: check both targets directly
    else
-      -- "uncovered": neither path exercised
+      -- Compound: collect off-line targets only
+      local off_targets = {}
+      for _, branch in ipairs(group) do
+         for _, target in ipairs(branch.targets) do
+            if target.line ~= line_nr then
+               off_targets[target.line] = true
+            end
+         end
+      end
+      -- off_targets now has the 2 observable outcomes
    end
 end
 ```
+
+This matches **decision coverage** (DC) semantics: each Boolean decision
+(potentially composed of multiple conditions) is covered when both its
+true and false outcomes are exercised.
+
+> **Why not instruction-level coverage?** C/gcov inserts arc counters at
+> compile time, tracking every branch instruction individually. Lua only
+> provides a line-level debug hook, so same-line instructions are
+> indistinguishable at runtime. Decision-level merging is the most accurate
+> coverage that Lua's runtime model can support.
 
 ### Reading branch coverage in HTML reports
 
@@ -268,26 +310,62 @@ branches = {
 
 1. 用 `deepbranches.get(func)` **发现**分支站点
 2. 在 LuaCov 下**运行**代码，收集每行的命中次数
-3. **交叉比对**：检查每个分支站点的目标行是否被命中
+3. 将同一行的分支**合并**为决策（见下文）
+4. **交叉比对**：检查每个决策的结果行是否被命中
+
+### 复合条件与决策级合并
+
+Lua 的调试钩子在**行级别**触发，而非指令级别。当一行源码包含多个 TEST 指令时
+（如 `if a or b or c`），`deepbranches.get` 会正确返回 3 个分支站点——但它们
+共享相同的行命中计数，因此无法实现指令级的覆盖率统计。
+
+**解决方案**：将同一行的分支合并为一个**决策**。对于复合条件，只跟踪与分支行
+**不同行号**的目标——这些才是真正可观测的结果（then 分支体 vs else 分支体）。
+
+```
+if a or b or c then   -- 3 个分支站点，都在此行
+   print("yes")       -- 结果 1（不同行的目标）
+else
+   print("no")        -- 结果 2（不同行的目标）
+end
+```
+
+合并算法：
+- **一行只有一个分支**：直接使用两个目标（标准覆盖率）
+- **一行有多个分支**：收集所有目标行号 ≠ 分支行号的目标，去重后作为决策的结果
 
 ```lua
+-- 按源码行号分组
+local line_groups = {}
 for _, branch in ipairs(branches) do
-   local targets_hit = 0
-   for _, target in ipairs(branch.targets) do
-      if (line_hits[target.line] or 0) > 0 then
-         targets_hit = targets_hit + 1
-      end
-   end
+   line_groups[branch.line] = line_groups[branch.line] or {}
+   table.insert(line_groups[branch.line], branch)
+end
 
-   if targets_hit == 2 then
-      -- "covered"：两条路径都被执行
-   elseif targets_hit == 1 then
-      -- "partial"：只有一条路径被执行
+for line_nr, group in pairs(line_groups) do
+   if #group == 1 then
+      -- 简单情况：直接检查两个目标
    else
-      -- "uncovered"：两条路径都未执行
+      -- 复合条件：只收集不同行的目标
+      local off_targets = {}
+      for _, branch in ipairs(group) do
+         for _, target in ipairs(branch.targets) do
+            if target.line ~= line_nr then
+               off_targets[target.line] = true
+            end
+         end
+      end
+      -- off_targets 现在包含 2 个可观测的结果
    end
 end
 ```
+
+这符合**决策覆盖率**（Decision Coverage, DC）的语义：每个布尔决策（可能由多个
+条件组合而成）在其 true 和 false 结果都被执行时算作"已覆盖"。
+
+> **为什么不能做指令级覆盖率？** C/gcov 在编译时插入弧计数器，可以逐条跟踪
+> 每个分支指令。Lua 只提供行级调试钩子，同一行的指令在运行时无法区分。
+> 决策级合并是 Lua 运行时模型能支持的最精确的覆盖率。
 
 ### 如何阅读 HTML 报告中的分支覆盖率
 
