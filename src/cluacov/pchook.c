@@ -19,6 +19,8 @@
 
 static char PCHOOK_KEY;
 static char TICK_KEY;
+static char SNAPSHOT_LINE_HITS_KEY;
+static char SNAPSHOT_ALL_HITS_KEY;
 
 static Proto *get_proto(lua_State *L, int idx) {
     return ((Closure *) lua_topointer(L, idx))->l.p;
@@ -136,6 +138,10 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
     lua_pop(L, 2);
 }
 
+static const char *get_source_name(const Proto *proto);
+static int l_get_all_line_hits(lua_State *L);
+static int l_get_all_hits(lua_State *L);
+
 static int l_start(lua_State *L) {
     int mask;
 
@@ -174,6 +180,22 @@ static int l_start(lua_State *L) {
 }
 
 static int l_stop(lua_State *L) {
+    /* Snapshot data before removing hook, so get_all_line_hits/get_all_hits
+       can safely return cached data even after Proto* pointers are invalid
+       (e.g. during GC finalizer at process exit). */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (!lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        /* Build and cache snapshots while Proto* pointers are still valid. */
+        l_get_all_line_hits(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+
+        l_get_all_hits(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    } else {
+        lua_pop(L, 1);
+    }
+
     lua_sethook(L, NULL, 0, 0);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
@@ -241,6 +263,10 @@ static int l_get_hits(lua_State *L) {
 static int l_reset(lua_State *L) {
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
     return 0;
 }
 
@@ -338,6 +364,13 @@ static const char *get_source_name(const Proto *proto) {
 }
 
 static int l_get_all_hits(lua_State *L) {
+    /* Return cached snapshot if available (safe during GC). */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    if (!lua_isnil(L, -1)) {
+        return 1;
+    }
+    lua_pop(L, 1);
+
     int outer_idx, result_idx;
 
     lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
@@ -400,6 +433,13 @@ static int l_get_all_hits(lua_State *L) {
 }
 
 static int l_get_all_line_hits(lua_State *L) {
+    /* Return cached snapshot if available (safe during GC). */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    if (!lua_isnil(L, -1)) {
+        return 1;
+    }
+    lua_pop(L, 1);
+
     int outer_idx, result_idx;
 
     lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
