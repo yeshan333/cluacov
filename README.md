@@ -14,5 +14,6 @@ functions. It reports conditional branches (`if`/`elseif`/`and`/`or`), numeric
 `for` loops, and generic `for` iterators. Combined with LuaCov line-hit data,
 it enables branch coverage analysis with LCOV/HTML report generation.
 
-See [docs/branch-coverage.md](docs/branch-coverage.md) for a detailed guide
+See [docs/branch-coverage.md](docs/branch-coverage.md)
+([中文版](docs/branch-coverage-zh.md)) for a detailed guide
 on how branch coverage works, the API reference, and how to generate reports.
