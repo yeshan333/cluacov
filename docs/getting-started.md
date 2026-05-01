@@ -256,10 +256,11 @@ Check your `.luacov` `include`/`exclude` patterns. The default excludes
 
 ### Slow test execution
 
-Per-instruction hooks fire on every VM instruction, which is significantly
-slower than line-level hooks. This is expected. For CI, the overhead is usually
-acceptable. For local iteration, you may prefer to run without coverage and
-only enable it for CI.
+Per-instruction hooks fire on every VM instruction. Each invocation is cheaper
+than the cluacov C line hook (no `lua_getstack` call), so overall overhead is
+comparable and often lower — see [benchmark](benchmark.md). Both modes add
+significant overhead vs no hook; for local iteration you may prefer to run
+without coverage and only enable it for CI.
 
 ### `get_hits` returns empty data
 

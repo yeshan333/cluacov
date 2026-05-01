@@ -1,0 +1,63 @@
+name: benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: master
+    paths:
+      - 'src/cluacov/**'
+      - 'bench/**'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@master
+
+    - name: Checkout luacov
+      uses: actions/checkout@master
+      with:
+        repository: lunarmodules/luacov
+        path: luacov-src
+        ref: master
+
+    - uses: luarocks/gh-actions-lua@master
+      with:
+        luaVersion: "5.5"
+
+    - uses: luarocks/gh-actions-luarocks@master
+      with:
+        luaRocksVersion: "3.13.0"
+
+    - name: Install dependencies
+      run: |
+        cd luacov-src && luarocks make && cd ..
+        luarocks make
+
+    - name: Run benchmark
+      run: lua bench/benchmark.lua | tee benchmark-results.txt
+
+    - name: Publish to Step Summary
+      run: |
+        {
+          echo "## Benchmark Results"
+          echo ""
+          echo "> **Note:** absolute ops/s values depend on runner load and are not"
+          echo "> comparable across runs. Slowdown ratios (hook ÷ baseline) are stable."
+          echo ""
+          echo '```'
+          cat benchmark-results.txt
+          echo '```'
+          echo ""
+          echo "_Runner: \`ubuntu-latest\` · Lua 5.5 · $(date -u '+%Y-%m-%d %H:%M UTC')_"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload results artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: benchmark-results.txt
