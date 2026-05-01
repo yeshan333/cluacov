@@ -17,7 +17,34 @@
 #error "pchook: unsupported Lua version (need 5.4+)"
 #endif
 
+/*
+ * Registry keys.
+ *
+ *   PCHOOK_KEY        : array-style table, keyed by 1-based entry id.
+ *                       Each entry is a Lua table with the materialized
+ *                       per-Proto metadata + per-PC hit counts:
+ *                         { source       = string,   -- copy of getstr(proto->source)
+ *                           linedefined  = integer,
+ *                           sizecode     = integer,
+ *                           lines        = { [pc] = line, ... }, -- 0-based pc
+ *                           hits         = { [pc1based] = count, ... } }
+ *                       After build, this table no longer references any
+ *                       Proto* pointer, so it remains safe to read even
+ *                       inside __gc finalizers.
+ *
+ *   PROTO_INDEX_KEY   : weak-ish lookup table (Proto* lightuserdata -> entry id).
+ *                       Used by the runtime hook to amortize the metadata
+ *                       materialization to once per Proto. Cleared by
+ *                       l_reset / l_start so stale entries from a previous
+ *                       run cannot leak into a fresh collection.
+ *
+ *   TICK_KEY          : optional tick-mode config table.
+ *
+ *   SNAPSHOT_*_KEY    : caches built by l_stop (or first call to a getter
+ *                       after stop), so subsequent calls are O(1).
+ */
 static char PCHOOK_KEY;
+static char PROTO_INDEX_KEY;
 static char TICK_KEY;
 static char SNAPSHOT_LINE_HITS_KEY;
 static char SNAPSHOT_ALL_HITS_KEY;
@@ -66,6 +93,108 @@ static int get_pc_line(const Proto *proto, int pc) {
     return luaG_getfuncline(proto, pc);
 }
 
+static const char *get_source_name(const Proto *proto) {
+    if (proto->source == NULL) return NULL;
+    return getstr(proto->source);
+}
+
+/*
+ * Materialize per-Proto metadata into a fresh Lua table on top of the stack.
+ *
+ * Layout of the returned table (top of stack on return):
+ *   { source       = string,    -- copy of getstr(proto->source) (or "?")
+ *     linedefined  = integer,
+ *     sizecode     = integer,
+ *     lines        = { [pc1based] = line, ... },  -- pre-resolved PC->line
+ *     hits         = {},                          -- to be populated by hook
+ *   }
+ *
+ * After this call, the entry table holds NO Proto* references and is therefore
+ * safe to read from any context, including __gc finalizers run during
+ * lua_close()/luaC_freeallobjects.
+ */
+static void materialize_proto_entry(lua_State *L, const Proto *proto) {
+    const char *source;
+    int pc;
+
+    lua_createtable(L, 0, 5);
+
+    source = get_source_name(proto);
+    if (source == NULL) {
+        lua_pushliteral(L, "?");
+    } else {
+        lua_pushstring(L, source);   /* makes a Lua-managed copy */
+    }
+    lua_setfield(L, -2, "source");
+
+    lua_pushinteger(L, proto->linedefined);
+    lua_setfield(L, -2, "linedefined");
+
+    lua_pushinteger(L, proto->sizecode);
+    lua_setfield(L, -2, "sizecode");
+
+    /* Pre-resolve PC -> line. Use 1-based PC keys to match the hits table. */
+    lua_createtable(L, proto->sizecode, 0);
+    for (pc = 0; pc < proto->sizecode; pc++) {
+        int line = get_pc_line(proto, pc);
+        if (line > 0) {
+            lua_pushinteger(L, line);
+            lua_rawseti(L, -2, pc + 1);
+        }
+    }
+    lua_setfield(L, -2, "lines");
+
+    lua_createtable(L, 0, 0);
+    lua_setfield(L, -2, "hits");
+}
+
+/*
+ * Look up (or create) the entry-id for the given Proto* in PROTO_INDEX_KEY,
+ * also ensuring PCHOOK_KEY[entry_id] holds the materialized entry table.
+ *
+ * On return: pushes the entry's `hits` subtable on the stack (top), and
+ * returns nothing. Caller is responsible for popping the hits table.
+ *
+ * Returns 0 on success, non-zero if PCHOOK_KEY/PROTO_INDEX_KEY are missing
+ * (in which case nothing extra is pushed).
+ */
+static int push_hits_for_proto(lua_State *L, const Proto *proto) {
+    lua_Integer entry_id;
+    int pchook_idx, index_idx;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return 1; }
+    pchook_idx = lua_gettop(L);
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+    if (lua_isnil(L, -1)) { lua_pop(L, 2); return 1; }
+    index_idx = lua_gettop(L);
+
+    /* PROTO_INDEX_KEY[Proto*] -> entry_id (or nil if first time). */
+    lua_rawgetp(L, index_idx, (const void *)proto);
+    entry_id = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+
+    if (entry_id == 0) {
+        /* First time we see this Proto: append a fresh entry. */
+        entry_id = (lua_Integer)lua_rawlen(L, pchook_idx) + 1;
+        materialize_proto_entry(L, proto);            /* push entry table */
+        lua_rawseti(L, pchook_idx, entry_id);          /* PCHOOK[entry_id] = entry */
+
+        lua_pushinteger(L, entry_id);
+        lua_rawsetp(L, index_idx, (const void *)proto); /* INDEX[Proto*] = entry_id */
+    }
+
+    /* Fetch entry, then its hits subtable. */
+    lua_rawgeti(L, pchook_idx, entry_id);              /* push entry */
+    lua_getfield(L, -1, "hits");                       /* push hits */
+    lua_remove(L, -2);                                 /* drop entry, keep hits */
+
+    lua_remove(L, index_idx);                          /* drop PROTO_INDEX_KEY */
+    lua_remove(L, pchook_idx);                         /* drop PCHOOK_KEY */
+    return 0;
+}
+
 static void pc_hook(lua_State *L, lua_Debug *ar) {
     /* Handle tick on line events. */
     if (ar->event == LUA_HOOKLINE) {
@@ -96,7 +225,6 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
 
     /* Handle PC tracking on count events. */
     Proto *proto;
-    const void *proto_key;
     CallInfo *ci;
     int pc;
     lua_Integer count;
@@ -109,36 +237,25 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
     }
 
     proto = get_proto(L, -1);
-    proto_key = (const void *)proto;
     lua_pop(L, 1);
 
     ci = (CallInfo *)ar->i_ci;
     pc = (int)(ci->u.l.savedpc - proto->code);
 
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
+    if (push_hits_for_proto(L, proto) != 0) {
         return;
     }
 
-    lua_rawgetp(L, -1, proto_key);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-        lua_pushvalue(L, -1);
-        lua_rawsetp(L, -3, proto_key);
-    }
-
-    lua_rawgeti(L, -1, pc);
+    /* Stack top: hits subtable. Use 1-based PC to match 'lines' table. */
+    lua_rawgeti(L, -1, pc + 1);
     count = lua_tointeger(L, -1) + 1;
     lua_pop(L, 1);
     lua_pushinteger(L, count);
-    lua_rawseti(L, -2, pc);
+    lua_rawseti(L, -2, pc + 1);
 
-    lua_pop(L, 2);
+    lua_pop(L, 1);
 }
 
-static const char *get_source_name(const Proto *proto);
 static int l_get_all_line_hits(lua_State *L);
 static int l_get_all_hits(lua_State *L);
 
@@ -151,6 +268,7 @@ static int l_start(lua_State *L) {
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
 
+    /* Ensure PCHOOK_KEY (array of entries) exists. */
     lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
@@ -159,6 +277,14 @@ static int l_start(lua_State *L) {
     } else {
         lua_pop(L, 1);
     }
+
+    /* PROTO_INDEX_KEY (Proto* lightuserdata -> entry id) MUST be re-created
+       on every start(): light-userdata identity is meaningful only while the
+       Proto is alive, and Lua may reuse the same address for a fresh Proto
+       across collections. Stale mappings would lead the hook to attribute
+       hits to the wrong entry. */
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
 
     mask = LUA_MASKCOUNT;
 
@@ -205,49 +331,296 @@ static int l_start(lua_State *L) {
 }
 
 static int l_stop(lua_State *L) {
-    /* Snapshot data before removing hook, so get_all_line_hits/get_all_hits
-       can safely return cached data even after Proto* pointers are invalid
-       (e.g. during GC finalizer at process exit). */
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (!lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        /* Build and cache snapshots while Proto* pointers are still valid. */
-        l_get_all_line_hits(L);
-        lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
-
-        l_get_all_hits(L);
-        lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
-    } else {
-        lua_pop(L, 1);
-    }
-
+    /* Drop the hook first so no further pc_hook callback can fire. We can
+       (and must) leave PCHOOK_KEY/PROTO_INDEX_KEY intact: the entries are
+       fully materialized Lua data and no longer reference Proto*, so they
+       can be safely consulted by get_all_*_hits even from a __gc context. */
     lua_sethook(L, NULL, 0, 0);
+
+    /* PROTO_INDEX_KEY uses Proto* lightuserdata as keys; once the hook is
+       removed there is no further need to keep the lookup, and Proto* may
+       become dangling at any point afterwards. Drop it now to make sure the
+       remainder of the program never reads those pointers again. */
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
     return 0;
 }
 
-static void collect_proto_hits(
+/*
+ * Build a (Proto* -> entry_id) index from the live PROTO_INDEX_KEY (when the
+ * hook is active) so that l_get_hits / l_get_line_hits can look up the entry
+ * for a user-passed function. When the hook is no longer active, this returns
+ * 0 (no entry found) and the caller emits an empty result.
+ *
+ * Returns the entry id (>= 1) on success, or 0 when the proto was never seen.
+ */
+static lua_Integer find_entry_id_for_proto(lua_State *L, const Proto *proto) {
+    lua_Integer entry_id;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lua_rawgetp(L, -1, (const void *)proto);
+    entry_id = lua_tointeger(L, -1);
+    lua_pop(L, 2);
+    return entry_id;
+}
+
+static int l_reset(lua_State *L) {
+    /* Drop everything: collected entries, Proto* lookup, and snapshot caches. */
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+
+    lua_newtable(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    return 0;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Aggregators that read PCHOOK_KEY (array of materialized entries) and write
+ * the final result tables. They use ABSOLUTE stack indices throughout to
+ * avoid the pitfalls of relative indices when local pushes/pops happen
+ * during inner loops.
+ *
+ * Both aggregators are self-contained: they touch only Lua-managed data
+ * (source strings, integer arrays/tables) and never dereference Proto*,
+ * so they are safe to call from any context, including __gc finalizers.
+ * ---------------------------------------------------------------------------
+ */
+
+static void aggregate_all_hits(lua_State *L, int result_idx) {
+    int pchook_idx;
+    int n, i;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return; }
+    pchook_idx = lua_gettop(L);
+
+    n = (int)lua_rawlen(L, pchook_idx);
+    for (i = 1; i <= n; i++) {
+        int entry_idx;
+        int list_idx;
+        int rec_idx;
+        int list_len;
+        const char *source;
+
+        lua_rawgeti(L, pchook_idx, i);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+        entry_idx = lua_gettop(L);
+
+        lua_getfield(L, entry_idx, "source");
+        source = lua_tostring(L, -1);
+        if (source == NULL) { lua_pop(L, 2); continue; }
+
+        /* result[source] : list of per-proto records */
+        lua_getfield(L, result_idx, source);
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_setfield(L, result_idx, source);
+        }
+        list_idx = lua_gettop(L);
+        list_len = (int)lua_rawlen(L, list_idx);
+
+        /* Build { linedefined, sizecode, hits } using absolute entry_idx. */
+        lua_createtable(L, 0, 3);
+        rec_idx = lua_gettop(L);
+
+        lua_getfield(L, entry_idx, "linedefined");
+        lua_setfield(L, rec_idx, "linedefined");
+        lua_getfield(L, entry_idx, "sizecode");
+        lua_setfield(L, rec_idx, "sizecode");
+        lua_getfield(L, entry_idx, "hits");
+        lua_setfield(L, rec_idx, "hits");
+
+        lua_rawseti(L, list_idx, list_len + 1);
+        /* Pop list, source string, entry. */
+        lua_pop(L, 3);
+    }
+
+    lua_pop(L, 1);  /* PCHOOK_KEY */
+}
+
+static void aggregate_all_line_hits(lua_State *L, int result_idx) {
+    int pchook_idx;
+    int n, i;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    if (lua_isnil(L, -1)) { lua_pop(L, 1); return; }
+    pchook_idx = lua_gettop(L);
+
+    n = (int)lua_rawlen(L, pchook_idx);
+    for (i = 1; i <= n; i++) {
+        int entry_idx;
+        int file_idx;
+        int lines_idx;
+        int hits_idx;
+        int max_line;
+        int lines_len;
+        int j;
+        const char *source;
+
+        lua_rawgeti(L, pchook_idx, i);
+        if (!lua_istable(L, -1)) { lua_pop(L, 1); continue; }
+        entry_idx = lua_gettop(L);
+
+        lua_getfield(L, entry_idx, "source");
+        source = lua_tostring(L, -1);
+        if (source == NULL) { lua_pop(L, 2); continue; }
+
+        /* result[source] : { [line]=max_count, max=N } */
+        lua_getfield(L, result_idx, source);
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            lua_createtable(L, 0, 1);
+            lua_pushinteger(L, 0);
+            lua_setfield(L, -2, "max");
+            lua_pushvalue(L, -1);
+            lua_setfield(L, result_idx, source);
+        }
+        file_idx = lua_gettop(L);
+
+        lua_getfield(L, file_idx, "max");
+        max_line = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        /* Walk entry.lines (1-based pc -> line) to mark active lines as 0. */
+        lua_getfield(L, entry_idx, "lines");
+        lines_idx = lua_gettop(L);
+        lines_len = (int)lua_rawlen(L, lines_idx);
+        for (j = 1; j <= lines_len; j++) {
+            int line;
+            lua_rawgeti(L, lines_idx, j);
+            line = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            if (line <= 0) continue;
+
+            lua_rawgeti(L, file_idx, line);
+            if (lua_isnil(L, -1)) {
+                lua_pop(L, 1);
+                lua_pushinteger(L, 0);
+                lua_rawseti(L, file_idx, line);
+            } else {
+                lua_pop(L, 1);
+            }
+            if (line > max_line) max_line = line;
+        }
+
+        /* Walk entry.hits (1-based pc -> count). */
+        lua_getfield(L, entry_idx, "hits");
+        hits_idx = lua_gettop(L);
+        lua_pushnil(L);
+        while (lua_next(L, hits_idx) != 0) {
+            int pc1based = (int)lua_tointeger(L, -2);
+            lua_Integer count = lua_tointeger(L, -1);
+            int line;
+            lua_pop(L, 1);  /* value */
+
+            /* line = entry.lines[pc1based] */
+            lua_rawgeti(L, lines_idx, pc1based);
+            line = (int)lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            if (line <= 0) continue;
+
+            lua_rawgeti(L, file_idx, line);
+            {
+                lua_Integer existing = lua_tointeger(L, -1);
+                lua_pop(L, 1);
+                if (count > existing) {
+                    lua_pushinteger(L, count);
+                    lua_rawseti(L, file_idx, line);
+                }
+            }
+            if (line > max_line) max_line = line;
+        }
+
+        lua_pushinteger(L, max_line);
+        lua_setfield(L, file_idx, "max");
+
+        /* Pop hits, lines, file, source, entry. */
+        lua_pop(L, 5);
+    }
+
+    lua_pop(L, 1);  /* PCHOOK_KEY */
+}
+
+static int l_get_all_hits(lua_State *L) {
+    int result_idx;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    if (!lua_isnil(L, -1)) return 1;
+    lua_pop(L, 1);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    aggregate_all_hits(L, result_idx);
+
+    lua_pushvalue(L, result_idx);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    return 1;
+}
+
+static int l_get_all_line_hits(lua_State *L) {
+    int result_idx;
+
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    if (!lua_isnil(L, -1)) return 1;
+    lua_pop(L, 1);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    aggregate_all_line_hits(L, result_idx);
+
+    lua_pushvalue(L, result_idx);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
+    return 1;
+}
+
+/*
+ * l_get_hits / l_get_line_hits — per-function variants. These are only useful
+ * while pchook is still active (the caller passes a live function whose
+ * Proto* must still be valid to traverse `proto->p[]`); after stop() they
+ * fall back to "empty" because we no longer have a reliable Proto* -> entry
+ * mapping for nested protos.
+ */
+static void collect_proto_hits_recursive(
     lua_State *L,
     Proto *proto,
-    int hits_idx,
     int result_idx,
     int *count
 ) {
-    const void *proto_key = (const void *)proto;
+    lua_Integer entry_id;
     int i;
 
-    lua_newtable(L);
-
+    /* Build a per-Proto record: { linedefined, sizecode, hits }. */
+    lua_createtable(L, 0, 3);
     lua_pushinteger(L, proto->linedefined);
     lua_setfield(L, -2, "linedefined");
-
     lua_pushinteger(L, proto->sizecode);
     lua_setfield(L, -2, "sizecode");
 
-    lua_rawgetp(L, hits_idx, proto_key);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
+    entry_id = find_entry_id_for_proto(L, proto);
+    if (entry_id > 0) {
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+        lua_rawgeti(L, -1, entry_id);
+        lua_getfield(L, -1, "hits");
+        lua_remove(L, -2);  /* entry */
+        lua_remove(L, -2);  /* PCHOOK_KEY */
+    } else {
         lua_newtable(L);
     }
     lua_setfield(L, -2, "hits");
@@ -255,13 +628,13 @@ static void collect_proto_hits(
     lua_rawseti(L, result_idx, ++(*count));
 
     for (i = 0; i < proto->sizep; i++) {
-        collect_proto_hits(L, proto->p[i], hits_idx, result_idx, count);
+        collect_proto_hits_recursive(L, proto->p[i], result_idx, count);
     }
 }
 
 static int l_get_hits(lua_State *L) {
     Proto *proto;
-    int hits_idx, result_idx;
+    int result_idx;
     int count = 0;
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
@@ -270,40 +643,20 @@ static int l_get_hits(lua_State *L) {
 
     proto = get_proto(L, 1);
 
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-    }
-    hits_idx = lua_gettop(L);
-
     lua_newtable(L);
     result_idx = lua_gettop(L);
 
-    collect_proto_hits(L, proto, hits_idx, result_idx, &count);
-
+    collect_proto_hits_recursive(L, proto, result_idx, &count);
     return 1;
 }
 
-static int l_reset(lua_State *L) {
-    lua_newtable(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    lua_pushnil(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
-    lua_pushnil(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
-    return 0;
-}
-
-static void collect_line_hits(
+static void collect_line_hits_recursive(
     lua_State *L,
     Proto *proto,
-    int hits_idx,
     int result_idx
 ) {
-    const void *proto_key = (const void *)proto;
+    lua_Integer entry_id;
     int pc, line, max_line;
-    lua_Integer existing, count;
     int i;
 
     for (pc = 0; pc < proto->sizecode; pc++) {
@@ -311,11 +664,12 @@ static void collect_line_hits(
         if (line <= 0) continue;
 
         lua_rawgeti(L, result_idx, line);
-        existing = lua_tointeger(L, -1);
-        lua_pop(L, 1);
-        if (existing == 0) {
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
             lua_pushinteger(L, 0);
             lua_rawseti(L, result_idx, line);
+        } else {
+            lua_pop(L, 1);
         }
 
         lua_getfield(L, result_idx, "max");
@@ -327,37 +681,41 @@ static void collect_line_hits(
         }
     }
 
-    lua_rawgetp(L, hits_idx, proto_key);
-    if (!lua_isnil(L, -1)) {
+    entry_id = find_entry_id_for_proto(L, proto);
+    if (entry_id > 0) {
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+        lua_rawgeti(L, -1, entry_id);
+        lua_getfield(L, -1, "hits");
         lua_pushnil(L);
         while (lua_next(L, -2) != 0) {
             int pc1based = (int)lua_tointeger(L, -2);
-            count = lua_tointeger(L, -1);
+            lua_Integer count = lua_tointeger(L, -1);
             lua_pop(L, 1);
 
             line = get_pc_line(proto, pc1based - 1);
             if (line <= 0) continue;
 
             lua_rawgeti(L, result_idx, line);
-            existing = lua_tointeger(L, -1);
-            lua_pop(L, 1);
-
-            if (count > existing) {
-                lua_pushinteger(L, count);
-                lua_rawseti(L, result_idx, line);
+            {
+                lua_Integer existing = lua_tointeger(L, -1);
+                lua_pop(L, 1);
+                if (count > existing) {
+                    lua_pushinteger(L, count);
+                    lua_rawseti(L, result_idx, line);
+                }
             }
         }
+        lua_pop(L, 3);  /* hits, entry, PCHOOK_KEY */
     }
-    lua_pop(L, 1);
 
     for (i = 0; i < proto->sizep; i++) {
-        collect_line_hits(L, proto->p[i], hits_idx, result_idx);
+        collect_line_hits_recursive(L, proto->p[i], result_idx);
     }
 }
 
 static int l_get_line_hits(lua_State *L) {
     Proto *proto;
-    int hits_idx, result_idx;
+    int result_idx;
 
     luaL_checktype(L, 1, LUA_TFUNCTION);
     luaL_argcheck(L, !lua_iscfunction(L, 1), 1,
@@ -365,192 +723,13 @@ static int l_get_line_hits(lua_State *L) {
 
     proto = get_proto(L, 1);
 
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-    }
-    hits_idx = lua_gettop(L);
-
     lua_newtable(L);
     result_idx = lua_gettop(L);
 
     lua_pushinteger(L, 0);
     lua_setfield(L, result_idx, "max");
 
-    collect_line_hits(L, proto, hits_idx, result_idx);
-
-    return 1;
-}
-
-static const char *get_source_name(const Proto *proto) {
-    if (proto->source == NULL) return NULL;
-    return getstr(proto->source);
-}
-
-static int l_get_all_hits(lua_State *L) {
-    /* Return cached snapshot if available (safe during GC). */
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
-    if (!lua_isnil(L, -1)) {
-        return 1;
-    }
-    lua_pop(L, 1);
-
-    int outer_idx, result_idx;
-
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-        return 1;
-    }
-    outer_idx = lua_gettop(L);
-
-    lua_newtable(L);
-    result_idx = lua_gettop(L);
-
-    lua_pushnil(L);
-    while (lua_next(L, outer_idx) != 0) {
-        const Proto *proto;
-        const char *source;
-        int count;
-
-        if (!lua_islightuserdata(L, -2)) {
-            lua_pop(L, 1);
-            continue;
-        }
-
-        proto = (const Proto *)lua_topointer(L, -2);
-        source = get_source_name(proto);
-        if (source == NULL) {
-            lua_pop(L, 1);
-            continue;
-        }
-
-        lua_getfield(L, result_idx, source);
-        if (lua_isnil(L, -1)) {
-            lua_pop(L, 1);
-            lua_newtable(L);
-            lua_pushvalue(L, -1);
-            lua_setfield(L, result_idx, source);
-        }
-
-        count = (int)lua_rawlen(L, -1);
-
-        lua_newtable(L);
-
-        lua_pushinteger(L, proto->linedefined);
-        lua_setfield(L, -2, "linedefined");
-
-        lua_pushinteger(L, proto->sizecode);
-        lua_setfield(L, -2, "sizecode");
-
-        lua_pushvalue(L, -3);
-        lua_setfield(L, -2, "hits");
-
-        lua_rawseti(L, -2, count + 1);
-
-        lua_pop(L, 1);
-        lua_pop(L, 1);
-    }
-
-    return 1;
-}
-
-static int l_get_all_line_hits(lua_State *L) {
-    /* Return cached snapshot if available (safe during GC). */
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
-    if (!lua_isnil(L, -1)) {
-        return 1;
-    }
-    lua_pop(L, 1);
-
-    int outer_idx, result_idx;
-
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        lua_newtable(L);
-        return 1;
-    }
-    outer_idx = lua_gettop(L);
-
-    lua_newtable(L);
-    result_idx = lua_gettop(L);
-
-    lua_pushnil(L);
-    while (lua_next(L, outer_idx) != 0) {
-        const Proto *proto;
-        const char *source;
-        int file_idx, pc, line, max_line;
-        lua_Integer existing, count;
-
-        if (!lua_islightuserdata(L, -2)) {
-            lua_pop(L, 1);
-            continue;
-        }
-
-        proto = (const Proto *)lua_topointer(L, -2);
-        source = get_source_name(proto);
-        if (source == NULL) {
-            lua_pop(L, 1);
-            continue;
-        }
-
-        lua_getfield(L, result_idx, source);
-        if (lua_isnil(L, -1)) {
-            lua_pop(L, 1);
-            lua_newtable(L);
-            lua_pushinteger(L, 0);
-            lua_setfield(L, -2, "max");
-            lua_pushvalue(L, -1);
-            lua_setfield(L, result_idx, source);
-        }
-        file_idx = lua_gettop(L);
-
-        for (pc = 0; pc < proto->sizecode; pc++) {
-            line = get_pc_line(proto, pc);
-            if (line <= 0) continue;
-
-            lua_rawgeti(L, file_idx, line);
-            existing = lua_tointeger(L, -1);
-            lua_pop(L, 1);
-            if (existing == 0) {
-                lua_pushinteger(L, 0);
-                lua_rawseti(L, file_idx, line);
-            }
-
-            lua_getfield(L, file_idx, "max");
-            max_line = (int)lua_tointeger(L, -1);
-            lua_pop(L, 1);
-            if (line > max_line) {
-                lua_pushinteger(L, line);
-                lua_setfield(L, file_idx, "max");
-            }
-        }
-
-        lua_pushnil(L);
-        while (lua_next(L, -3) != 0) {
-            int pc1based = (int)lua_tointeger(L, -2);
-            count = lua_tointeger(L, -1);
-            lua_pop(L, 1);
-
-            line = get_pc_line(proto, pc1based - 1);
-            if (line <= 0) continue;
-
-            lua_rawgeti(L, file_idx, line);
-            existing = lua_tointeger(L, -1);
-            lua_pop(L, 1);
-
-            if (count > existing) {
-                lua_pushinteger(L, count);
-                lua_rawseti(L, file_idx, line);
-            }
-        }
-
-        lua_pop(L, 1);
-        lua_pop(L, 1);
-    }
+    collect_line_hits_recursive(L, proto, result_idx);
 
     return 1;
 }
