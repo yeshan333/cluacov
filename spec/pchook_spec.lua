@@ -257,6 +257,99 @@ describe("pchook", function()
             end
             assert.equal(0, hit_count)
          end)
+
+         describe("regression: function-body first line shows hits=0 (savedpc off-by-one)", function()
+            -- See docs/bugs/2026-05-02-savedpc-off-by-one.md.
+            --
+            -- The pchook hits table uses `savedpc - proto->code` as its key, which
+            -- by Lua's interpreter convention is the PC of the NEXT instruction
+            -- to execute (luaG_traceexec does `pc++; ci->u.l.savedpc = pc;` BEFORE
+            -- invoking any hook - see Lua's own pcRel macro in src/ldebug.h).
+            --
+            -- collect_line_hits_recursive must therefore subtract 1 when mapping
+            -- a hits-table key back to a source line. A previous "fix" removed
+            -- this -1 (assuming the key was 1-based), which produced a regression
+            -- where:
+            --   * the first executable line of every function body reported 0,
+            --   * the line after it absorbed the missing hits.
+
+            it("attributes hits to the first executable line of the function body", function()
+               -- Pattern: `local x = expr` is the very first statement after the
+               -- function header. Before the fix this line consistently reported 0.
+               local func = load_function([[
+                  return function(cobj)
+                     local t = cobj._type           -- expected: HIT
+                     if t == "struct" then          -- expected: HIT
+                        return "ok"
+                     end
+                     return "no"
+                  end
+               ]])
+
+               pchook.start()
+               for _ = 1, 3 do func({_type = "struct"}) end
+               pchook.stop()
+
+               local lines = pchook.get_line_hits(func)
+
+               -- Find the first source line that is mapped to a hit count.
+               -- It must correspond to `local t = cobj._type` and be HIT.
+               local first_active_line, first_hits
+               for line_nr = 1, lines.max do
+                  if lines[line_nr] and lines[line_nr] > 0 then
+                     first_active_line = line_nr
+                     first_hits = lines[line_nr]
+                     break
+                  end
+               end
+
+               assert.is_number(first_active_line)
+               assert.is_true(first_hits >= 1,
+                  "first executable line of the function body must have hits >= 1, got " ..
+                  tostring(first_hits) .. " at line " .. tostring(first_active_line))
+            end)
+
+            it("attributes hits to the first executable line inside an if-block", function()
+               -- Pattern: `local x = expr` as the FIRST instruction inside an
+               -- if-block (a jump target). Before the fix this line was credited
+               -- to the next line because the jump landed on its instruction but
+               -- the hook only fires on the SECOND instruction inside the block.
+               local func = load_function([[
+                  return function(items)
+                     local out = {}
+                     for i, v in ipairs(items) do
+                        if type(v) == "string" then
+                           local cleaned = v               -- expected: HIT
+                           out[#out + 1] = cleaned
+                        end
+                     end
+                     return out
+                  end
+               ]])
+
+               pchook.start()
+               func({"a", "b", "c"})
+               pchook.stop()
+
+               local lines = pchook.get_line_hits(func)
+
+               -- Locate the `local cleaned = v` line by source position: it is
+               -- the first line strictly inside the if-block.
+               local cleaned_line_hits
+               for line_nr = 1, lines.max do
+                  if lines[line_nr] and lines[line_nr] >= 3 then
+                     -- 3 strings → ipairs body executed 3 times → cleaned = v
+                     -- must be at least 3
+                     cleaned_line_hits = lines[line_nr]
+                     break
+                  end
+               end
+
+               assert.is_true(cleaned_line_hits ~= nil and cleaned_line_hits >= 3,
+                  "first executable line inside the if-block must be hit at least 3 times, got "
+                  .. tostring(cleaned_line_hits))
+            end)
+         end)
       end)
 
       describe("get_all_hits", function()
