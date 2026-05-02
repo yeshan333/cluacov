@@ -5,9 +5,16 @@
 C extensions for [LuaCov](https://github.com/lunarmodules/luacov), improving
 performance and reducing number of lines incorrectly marked as missed.
 
-To install using [LuaRocks](https://luarocks.org/) run
-`luarocks install cluacov`. cluacov depends on luacov, so that running this
-command is enough to set up luacov with extensions.
+To install using [LuaRocks](https://luarocks.org/), build from a local checkout:
+
+```sh
+git clone https://github.com/yeshan333/cluacov.git
+cd cluacov
+luarocks make
+```
+
+cluacov depends on luacov, so `luarocks make` is enough to set up luacov with
+extensions.
 
 See [docs/getting-started.md](docs/getting-started.md) for a quick-start guide
 on how to add cluacov to your project.
