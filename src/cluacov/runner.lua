@@ -25,7 +25,43 @@ local function file_included(config, filename)
       and not match_any(config.exclude, name, false)
 end
 
-local function load_config()
+local function load_config_chunk(configfile, env)
+   if setfenv then
+      local chunk, err = loadfile(configfile)
+      if not chunk then return nil, err end
+      setfenv(chunk, env)
+      return chunk
+   end
+   return loadfile(configfile, "t", env)
+end
+
+local function load_user_config(configfile)
+   local env = setmetatable({}, { __index = _G })
+   local chunk, load_err = load_config_chunk(configfile, env)
+   if not chunk then
+      return nil, "load", load_err
+   end
+   local ok, ret = pcall(chunk)
+   if not ok then
+      return nil, "run", ret
+   end
+   if type(ret) == "table" then
+      for k, v in pairs(ret) do
+         if rawget(env, k) == nil then
+            env[k] = v
+         end
+      end
+   end
+   setmetatable(env, nil)
+   if next(env) ~= nil then
+      return env
+   end
+   return nil
+end
+
+local MERGE_KEYS = { exclude = true, include = true }
+
+local function load_config(configfile)
    local config = {
       statsfile = "luacov.stats.out",
       lcovfile = "lcov.info",
@@ -42,12 +78,37 @@ local function load_config()
       },
    }
 
-   local configfile = os.getenv("LUACOV_CONFIG") or ".luacov"
-   local ok, user = pcall(dofile, configfile)
-   if ok and type(user) == "table" then
+   local is_explicit = type(configfile) == "string"
+   if not is_explicit then
+      configfile = os.getenv("LUACOV_CONFIG") or ".luacov"
+   end
+
+   local user, err_type, err_msg = load_user_config(configfile)
+   if user then
       for k, v in pairs(user) do
-         config[k] = v
+         if MERGE_KEYS[k] and type(v) == "table" and type(config[k]) == "table" then
+            for _, item in ipairs(v) do
+               config[k][#config[k] + 1] = item
+            end
+         else
+            config[k] = v
+         end
       end
+   elseif err_type == "load" then
+      local fh = io.open(configfile, "r")
+      if fh then
+         fh:close()
+         io.stderr:write(string.format(
+            "[cluacov] warning: failed to load %s: %s\n",
+            configfile, tostring(err_msg)))
+      elseif is_explicit or os.getenv("LUACOV_CONFIG") then
+         io.stderr:write(string.format(
+            "[cluacov] warning: config file not found: %s\n", configfile))
+      end
+   elseif err_type == "run" then
+      io.stderr:write(string.format(
+         "[cluacov] warning: error running %s: %s\n",
+         configfile, tostring(err_msg)))
    end
 
    return config
@@ -242,16 +303,7 @@ end
 function runner.init(configfile)
    if runner.initialized then return end
 
-   if type(configfile) == "string" then
-      local ok, cfg = pcall(dofile, configfile)
-      if ok and type(cfg) == "table" then
-         runner.config = cfg
-      else
-         runner.config = load_config()
-      end
-   else
-      runner.config = load_config()
-   end
+   runner.config = load_config(configfile)
 
    runner.tick = runner.config.tick or false
    runner.initialized = true

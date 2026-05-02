@@ -200,5 +200,113 @@ io.flush()
 
          assert.equal("NO_ANCHOR", result, "runner._anchor should be nil when tick=true")
       end)
+
+      describe("config loading", function()
+         local sep = is_windows and "\\" or "/"
+
+         local function write_file(path, content)
+            local fh = assert(io.open(path, "w"))
+            fh:write(content)
+            fh:close()
+         end
+
+         local function run_dump(cfg_path)
+            local dump_path = tmpdir .. sep .. "dump_config.lua"
+            write_file(dump_path, [[
+local runner = require("cluacov.runner")
+for _, v in ipairs(runner.config.exclude or {}) do
+   io.write("EXCLUDE:" .. v .. "\n")
+end
+for _, v in ipairs(runner.config.include or {}) do
+   io.write("INCLUDE:" .. v .. "\n")
+end
+io.flush()
+]])
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua dump_config.lua 2>&1',
+                  cfg_path, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua dump_config.lua 2>&1",
+                  tmpdir, cfg_path)
+            end
+            local fh = io.popen(cmd)
+            local output = fh:read("*a")
+            fh:close()
+            return output
+         end
+
+         it("loads bare-assignment .luacov config", function()
+            local cfg_path = tmpdir .. sep .. ".luacov_bare"
+            write_file(cfg_path, 'include = { "mymodule$" }\n')
+
+            local output = run_dump(cfg_path)
+            assert.is_truthy(output:match("INCLUDE:mymodule%$"),
+               "bare-assignment include should be loaded")
+         end)
+
+         it("merges user exclude with defaults for return-style config", function()
+            local cfg_path = tmpdir .. sep .. ".luacov_merge_ret"
+            write_file(cfg_path, 'return {\n   exclude = { "%.spec$" },\n}\n')
+
+            local output = run_dump(cfg_path)
+            assert.is_truthy(output:match("EXCLUDE:%%.spec%$"),
+               "user exclude pattern should be present")
+            assert.is_truthy(output:match("EXCLUDE:busted%%."),
+               "default exclude 'busted%%.' should be preserved")
+            assert.is_truthy(output:match("EXCLUDE:cluacov%%."),
+               "default exclude 'cluacov%%.' should be preserved")
+         end)
+
+         it("merges bare-assignment exclude with defaults", function()
+            local cfg_path = tmpdir .. sep .. ".luacov_merge_bare"
+            write_file(cfg_path, 'exclude = { "%.spec$" }\n')
+
+            local output = run_dump(cfg_path)
+            assert.is_truthy(output:match("EXCLUDE:%%.spec%$"),
+               "user exclude pattern should be present")
+            assert.is_truthy(output:match("EXCLUDE:busted%%."),
+               "default exclude 'busted%%.' should be preserved")
+         end)
+
+         it("prioritizes bare assignment over return table for same key", function()
+            local cfg_path = tmpdir .. sep .. ".luacov_mixed"
+            write_file(cfg_path, [[
+exclude = { "%.spec$" }
+return {
+   include = { "mymodule$" },
+   exclude = { "%.test$" },
+}
+]])
+
+            local output = run_dump(cfg_path)
+            assert.is_truthy(output:match("EXCLUDE:%%.spec%$"),
+               "bare-assignment exclude should be present")
+            assert.is_falsy(output:match("EXCLUDE:%%.test%$"),
+               "return-table exclude should be ignored when bare assignment exists")
+            assert.is_truthy(output:match("INCLUDE:mymodule%$"),
+               "return-table include should be loaded (no bare-assignment conflict)")
+         end)
+
+         it("warns on config file with runtime error", function()
+            local cfg_path = tmpdir .. sep .. ".luacov_runerr"
+            write_file(cfg_path, 'error("intentional test error")\n')
+
+            local output = run_dump(cfg_path)
+            assert.is_truthy(output:match("%[cluacov%] warning"),
+               "should warn on config runtime error")
+         end)
+
+         it("warns on config file with syntax error", function()
+            local cfg_path = tmpdir .. sep .. ".luacov_syntax"
+            write_file(cfg_path, 'this is not valid lua {{{}\n')
+
+            local output = run_dump(cfg_path)
+            assert.is_truthy(output:match("%[cluacov%] warning"),
+               "should warn on config syntax error")
+         end)
+      end)
    end
 end)
