@@ -146,47 +146,66 @@ Line 66   [# #]:  0 :    if a >= b then     -- neither path taken
 A frequent question when reading the HTML report:
 
 ```
-   12         :   1 : end           ← function-end:  marked executable, 1 hit
-   25         :     :    end        ← if-block end:  NOT executable (blank)
-   42         :   0 :    end        ← for-loop end:  executable, 0 hits
+   11         :   1 : end           ← function-end:    marked executable, 1 hit
+   33         :     :    end        ← simple-for end: NOT executable (blank)
+   42         :   1 :    end        ← for end w/break: executable, 1 hit
+  126         :   1 :    end        ← for end w/upvalue: executable, 1 hit
+  167         :     :       end     ← simple-while end: NOT executable (blank)
+   25         :     :    end        ← if-block end:    NOT executable (blank)
 ```
 
 This is **not a cluacov bug** — it reflects the underlying Lua bytecode. A
 source line is marked "executable" only if the Lua compiler emits at least
 one bytecode instruction whose `lineinfo` entry maps back to that line.
 The `end` keyword itself isn't a "statement" in any meaningful sense; whether
-it shows up in the line table depends entirely on what control-flow
-instruction (if any) the compiler chose to anchor there:
+it shows up in the line table depends **entirely on whether the compiler had
+any cleanup or control-flow instruction it needed to anchor there**:
 
-| `end` location | Bytecode anchored to that line | Executable? |
-|----------------|--------------------------------|:-----------:|
-| **Function `end`** | `OP_RETURN` (the implicit `return nil`) | ✅ Yes |
-| **`for` loop `end`** | `OP_FORLOOP` (back-edge jump to loop head) | ✅ Yes |
-| **`while` loop `end`** | `OP_JMP` (back-edge to the `while` condition) | ✅ Yes |
-| **`repeat`'s `until`** | `OP_TEST` for the until-condition | ✅ Yes (on the `until` line) |
-| **`if`/`elseif`/`else` block `end`** | *(none — the compiler emits no instruction here)* | ❌ No |
-| **`do ... end` block `end`** | *(none)* | ❌ No |
+| `end` location | What anchors there (if anything) | Executable? |
+|----------------|----------------------------------|:-----------:|
+| **Function `end`** | `OP_RETURN0` (implicit `return nil`) | ✅ Always |
+| **`if`/`elseif`/`else` block `end`** | *(nothing — control flow already handled by `OP_JMP`s on the `then`/`else` branches)* | ❌ Never |
+| **`do ... end` block `end`** | *(nothing)* | ❌ Never |
+| **`repeat`'s `until` line** | The condition test (`LE`/`EQ`/`LT`) + back-edge `OP_JMP` | ✅ Always |
+| **`for` loop `end` (simple, no captures)** | *(nothing — `OP_FORLOOP`/`OP_TFORLOOP` is anchored to the `for` line, NOT the `end` line)* | ❌ No |
+| **`for` loop `end` (with `break` to-be-closed slot)** | `OP_TFORLOOP` (5.5 anchors it on the `end` line) | ✅ Yes |
+| **`for` loop `end` (with closure capturing loop variable)** | `OP_CLOSE` (closes the upvalue at scope exit) | ✅ Yes |
+| **`while` loop `end` (simple)** | *(nothing — back-edge `OP_JMP` is anchored to the body's last line)* | ❌ No |
+| **`while` loop `end` (with closure to close)** | `OP_CLOSE` | ✅ Yes |
 
-The intuition: loop and function `end`s correspond to a real runtime action
-(a return, or a back-jump). `if-end` and `do-end` are pure syntax markers —
-the surrounding `OP_JMP` instructions on the `then`/`else` branches handle
-control flow without ever needing to "execute" the `end` line itself.
+The intuition: function `end`s correspond to a real runtime action (RETURN);
+`if-end` and `do-end` are pure syntax markers; loop `end`s are
+**conditional** — they only get an instruction when the compiler has actual
+work to do at scope exit (closing an upvalue, or in some 5.5 cases anchoring
+a back-edge instruction). For "plain" loops with no captures, the back-jump
+is anchored to the body's last source line, not the `end` line, so the `end`
+line stays blank.
 
-You can verify this for any function with `luac -l -p file.lua`:
+You can verify this for any function with `luac -l -p file.lua`. From
+`e2e/sample.lua` (Lua 5.5):
 
 ```
-[L42]  23  TFORLOOP  ...    ← anchored on L42 (the for-loop's `end`)
-[L44]  24  RETURN    ...    ← anchored on L44 (the function's `end`)
-                            ← (no instruction is anchored on L41,
-                              the if-block's `end` — so it stays blank)
+M.sum (L29-L35) — simple for, no closure:
+  [31]  FORPREP  ...           ← anchored on L31 (the `for` line)
+  [32]  GETTABLE/ADD/MMBIN     ← anchored on L32 (loop body)
+  [31]  FORLOOP  ...            ← anchored on L31 (NOT L33 — that's why
+                                  L33's `end` stays blank!)
+  [34]  RETURN1  ...           ← anchored on L34 (`return total`)
+  [35]  RETURN0  ...           ← anchored on L35 (function `end`) ✅
+
+M.if_block_first_line (L119-L128) — for-in with break + closed local:
+  [126] CLOSE  2               ← anchored on L126 (the for `end`) ✅
+                                  this is why L126 IS executable
+  [128] RETURN ...             ← anchored on L128 (function `end`) ✅
 ```
 
 In short: **every `end` line you see marked with a hit count is the target
-of a real control-flow instruction; every blank `end` line just means the
-compiler had no reason to emit anything there.** This is consistent with how
-`luacov`, `lcov`/`gcov`, and other Lua coverage tools render the same code,
-and it keeps the "lines covered" denominator honest — counting blank `end`s
-as un-coverable lines would artificially inflate every project's coverage.
+of a real instruction (RETURN, CLOSE, FORLOOP, ...); every blank `end` line
+just means the compiler had no reason to emit anything there.** This is
+consistent with how `luacov`, `lcov`/`gcov`, and other Lua coverage tools
+render the same code, and it keeps the "lines covered" denominator honest —
+counting blank `end`s as un-coverable lines would artificially inflate every
+project's coverage.
 
 ## Generating LCOV Reports
 
