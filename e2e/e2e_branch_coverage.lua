@@ -103,10 +103,36 @@ for line in io.lines(sample_file) do
    source_lines[#source_lines + 1] = line
 end
 
+-- Extract a UNIQUE display name for each function definition. We must
+-- handle all of these forms appearing in sample.lua:
+--   function M.foo(...)         → "foo"            (module method)
+--   function M:bar(...)         → "bar"            (rare; reserved for future)
+--   function Point.new(...)     → "Point.new"      (class constructor)
+--   function Point:translate(...) → "Point:translate"  (instance method)
+--   function is_even(...)       → "is_even"        (module-local forward decl)
+-- The naive `^function%s+%S-%.([%w_]+)` regex collapsed `Point.new`,
+-- `Point:translate`, and `Point:length` all to "Point", which made
+-- genhtml choke with "duplicate function 'Point'". Disambiguate by
+-- keeping the table-prefix when it is anything OTHER than the module
+-- table `M`.
 local func_defs = {}
 for line_nr, line in ipairs(source_lines) do
-   local fname = line:match("^function%s+%S-%.([%w_]+)")
-      or line:match("^function%s+([%w_]+)")
+   -- Try table-method forms first: `function Foo.bar(...)` / `function Foo:bar(...)`
+   local table_name, sep, method_name =
+      line:match("^function%s+([%w_]+)([%.:])([%w_]+)")
+   local fname
+   if table_name then
+      if table_name == "M" then
+         -- Module table — drop the "M." prefix so the report stays clean.
+         fname = method_name
+      else
+         -- Class-like table — keep the prefix so methods don't collide.
+         fname = table_name .. sep .. method_name
+      end
+   else
+      -- Bare top-level form: `function name(...)`
+      fname = line:match("^function%s+([%w_]+)")
+   end
    if fname then
       func_defs[#func_defs + 1] = { line = line_nr, name = fname }
    end
