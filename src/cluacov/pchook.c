@@ -724,11 +724,11 @@ static void collect_line_hits_recursive(
         lua_getfield(L, -1, "hits");
         lua_pushnil(L);
         while (lua_next(L, -2) != 0) {
-            int pc1based = (int)lua_tointeger(L, -2);
+            int pc = (int)lua_tointeger(L, -2);
             lua_Integer count = lua_tointeger(L, -1);
             lua_pop(L, 1);
 
-            line = get_pc_line(proto, pc1based - 1);
+            line = get_pc_line(proto, pc);
             if (line <= 0) continue;
 
             lua_rawgeti(L, result_idx, line);
