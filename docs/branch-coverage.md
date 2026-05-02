@@ -141,6 +141,53 @@ Line 66   [# #]:  0 :    if a >= b then     -- neither path taken
 - `+` = this branch path was taken
 - `#` = this branch path was **not** taken (not executed)
 
+### Why some `end` lines have hits but others are blank
+
+A frequent question when reading the HTML report:
+
+```
+   12         :   1 : end           ← function-end:  marked executable, 1 hit
+   25         :     :    end        ← if-block end:  NOT executable (blank)
+   42         :   0 :    end        ← for-loop end:  executable, 0 hits
+```
+
+This is **not a cluacov bug** — it reflects the underlying Lua bytecode. A
+source line is marked "executable" only if the Lua compiler emits at least
+one bytecode instruction whose `lineinfo` entry maps back to that line.
+The `end` keyword itself isn't a "statement" in any meaningful sense; whether
+it shows up in the line table depends entirely on what control-flow
+instruction (if any) the compiler chose to anchor there:
+
+| `end` location | Bytecode anchored to that line | Executable? |
+|----------------|--------------------------------|:-----------:|
+| **Function `end`** | `OP_RETURN` (the implicit `return nil`) | ✅ Yes |
+| **`for` loop `end`** | `OP_FORLOOP` (back-edge jump to loop head) | ✅ Yes |
+| **`while` loop `end`** | `OP_JMP` (back-edge to the `while` condition) | ✅ Yes |
+| **`repeat`'s `until`** | `OP_TEST` for the until-condition | ✅ Yes (on the `until` line) |
+| **`if`/`elseif`/`else` block `end`** | *(none — the compiler emits no instruction here)* | ❌ No |
+| **`do ... end` block `end`** | *(none)* | ❌ No |
+
+The intuition: loop and function `end`s correspond to a real runtime action
+(a return, or a back-jump). `if-end` and `do-end` are pure syntax markers —
+the surrounding `OP_JMP` instructions on the `then`/`else` branches handle
+control flow without ever needing to "execute" the `end` line itself.
+
+You can verify this for any function with `luac -l -p file.lua`:
+
+```
+[L42]  23  TFORLOOP  ...    ← anchored on L42 (the for-loop's `end`)
+[L44]  24  RETURN    ...    ← anchored on L44 (the function's `end`)
+                            ← (no instruction is anchored on L41,
+                              the if-block's `end` — so it stays blank)
+```
+
+In short: **every `end` line you see marked with a hit count is the target
+of a real control-flow instruction; every blank `end` line just means the
+compiler had no reason to emit anything there.** This is consistent with how
+`luacov`, `lcov`/`gcov`, and other Lua coverage tools render the same code,
+and it keeps the "lines covered" denominator honest — counting blank `end`s
+as un-coverable lines would artificially inflate every project's coverage.
+
 ## Generating LCOV Reports
 
 ### LCOV branch record format
