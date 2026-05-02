@@ -2,8 +2,23 @@
 
 ## Unreleased
 
+### Added
+
+- `cluacov.pchook` and `cluacov.branchcov` now support per-PC,
+  instruction-level branch coverage on PUC-Rio Lua 5.4 and 5.5.
+- Added runtime coverage / branch metadata tests plus end-to-end
+  scenarios for branch coverage, line-hook coverage, runner shutdown,
+  coroutine execution, multi-source aggregation, and tick-mode stats
+  flushing.
+
 ### Bug fixes
 
+- `cluacov.pchook`: avoid a shutdown-time segmentation fault by
+  materializing `Proto` metadata into Lua tables instead of keeping
+  raw C pointers alive into `__gc` finalization paths.
+- `.luacov` parsing now supports bare-assignment config files and
+  merges user `include` / `exclude` patterns with the default
+  exclusions instead of replacing them.
 - `cluacov.pchook`: function-body first executable line now reports
   correct hit counts in `pchook.get_line_hits` (and therefore in any
   LCOV report built from it). Previously, statements like
@@ -18,6 +33,13 @@
   unchanged: it correctly relies on the next-instruction-PC contract.
   See `docs/bugs/2026-05-02-savedpc-off-by-one.md` for the full
   post-mortem.
+
+### Documentation
+
+- Expanded the branch-coverage guide, benchmark documentation, and
+  contributor-facing repository guidance.
+- README installation now documents building from a local checkout via
+  `luarocks make`.
 
 ## Releasing new versions
 
