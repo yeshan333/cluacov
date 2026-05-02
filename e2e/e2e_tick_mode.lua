@@ -13,7 +13,8 @@
 --
 -- This script runs a workload large enough to trigger save_stats AT
 -- LEAST `min_expected_calls` times, asserts the callback fired, AND
--- asserts that hit-collection still works correctly while ticking.
+-- asserts that hit-collection still works correctly while ticking,
+-- including the per-PC branch-coverage path used by branchcov/LCOV.
 --
 
 local function resolve_dir(path)
@@ -24,7 +25,13 @@ local function resolve_dir(path)
 end
 
 local e2e_dir = resolve_dir(arg[0]:match("(.-)[^/]*$") or "./")
+local output_dir = e2e_dir .. "output"
+local sample_file = e2e_dir .. "sample.lua"
+local tick_lcov_file = output_dir .. "/tick_branch_coverage.lcov"
+local tick_html_dir = output_dir .. "/tick_branch/html"
+
 package.path = e2e_dir .. "?.lua;" .. package.path
+os.execute("mkdir -p " .. output_dir)
 
 local pchook = require("cluacov.pchook")
 
@@ -32,6 +39,7 @@ print("=== Step 1: Starting pchook in tick mode ===")
 
 local save_calls = 0
 local hits_at_each_save = {}
+local pc_protos_at_each_save = {}
 
 -- savestepsize=50: ~50 line events per save callback. The workload
 -- below triggers thousands of line events.
@@ -46,12 +54,27 @@ pchook.start({
       local n_sources = 0
       for _ in pairs(snap) do n_sources = n_sources + 1 end
       hits_at_each_save[#hits_at_each_save + 1] = n_sources
+
+      -- Also exercise the per-PC aggregation path while the hook is still
+      -- active. Branch coverage depends on this data, not just line hits.
+      local pc_snap = pchook.get_all_hits()
+      local n_protos = 0
+      for _, protos in pairs(pc_snap) do
+         if type(protos) == "table" then
+            n_protos = n_protos + #protos
+         end
+      end
+      pc_protos_at_each_save[#pc_protos_at_each_save + 1] = n_protos
    end,
 })
 
 print("=== Step 2: Running large workload ===")
 
-local sample = require("sample")
+-- Use an explicit chunk object, not `require("sample")`, so branchcov can
+-- analyze the exact same Proto tree that executed under the tick hook.
+local sample_func = assert(loadfile(sample_file))
+local sample = sample_func()
+package.loaded["sample"] = sample
 
 -- Hammer multiple sample functions to generate plenty of line events.
 local total_iterations = 500
@@ -105,6 +128,18 @@ if last < first then
       first, last)
 end
 
+local pc_first = pc_protos_at_each_save[1] or 0
+local pc_last = pc_protos_at_each_save[#pc_protos_at_each_save] or 0
+ok("first save PC snapshot saw %d proto(s); last save saw %d proto(s)",
+   pc_first, pc_last)
+if pc_last <= 0 then
+   fail("PC snapshots never observed any proto data during tick mode")
+end
+if pc_last < pc_first then
+   fail("PC snapshot proto-count shrank from %d to %d across saves",
+      pc_first, pc_last)
+end
+
 print("=== Step 5: Asserting final hit data is complete ===")
 
 -- After stop(), the global aggregate must contain at least sample.lua
@@ -134,6 +169,126 @@ if sum_body_hits < 1000 then
    fail("M.sum body line 32 hit %d times; expected >= 1000", sum_body_hits)
 end
 ok("M.sum body line 32 hit %d times (>= 1000)", sum_body_hits)
+
+print("=== Step 6: Asserting tick-mode branch coverage is complete ===")
+
+local branchcov = require("cluacov.branchcov")
+local result = branchcov.analyze(sample_func)
+
+if #result.branches <= 0 then
+   fail("branchcov found no branch sites under tick mode")
+end
+if result.total <= #result.branches then
+   fail("branch target count %d should be greater than branch site count %d",
+      result.total, #result.branches)
+end
+if result.hit <= 0 then
+   fail("branchcov found %d branch targets but none were hit under tick mode",
+      result.total)
+end
+
+local covered, partial = 0, 0
+for _, branch in ipairs(result.branches) do
+   if branch.status == "covered" then
+      covered = covered + 1
+   elseif branch.status == "partial" then
+      partial = partial + 1
+   end
+end
+if covered <= 0 then
+   fail("tick-mode branch coverage produced no covered branches")
+end
+if partial <= 0 then
+   fail("tick-mode branch coverage produced no partial branches")
+end
+ok("branchcov under tick mode: %d sites, %d targets, %d hit, %d covered, %d partial",
+   #result.branches, result.total, result.hit, covered, partial)
+
+local lcov_fh = assert(io.open(tick_lcov_file, "w"))
+lcov_fh:write("TN:cluacov-e2e-tick\n")
+lcov_fh:write("SF:" .. sample_file .. "\n")
+
+local block_id = 0
+local branches_found, branches_hit = 0, 0
+for _, branch in ipairs(result.branches) do
+   branches_found = branches_found + #branch.targets
+   for target_idx, target in ipairs(branch.targets) do
+      lcov_fh:write(string.format("BRDA:%d,%d,%d,%s\n",
+         branch.line,
+         block_id,
+         target_idx - 1,
+         target.hits > 0 and tostring(target.hits) or "-"))
+      if target.hits > 0 then
+         branches_hit = branches_hit + 1
+      end
+   end
+   block_id = block_id + 1
+end
+lcov_fh:write(string.format("BRF:%d\n", branches_found))
+lcov_fh:write(string.format("BRH:%d\n", branches_hit))
+
+local deepactivelines = require("cluacov.deepactivelines")
+local active_lines = deepactivelines.get(sample_func)
+local lines_found, lines_hit = 0, 0
+for line_nr = 1, sample_lines.max or 0 do
+   if active_lines[line_nr] then
+      local hits = sample_lines[line_nr] or 0
+      lcov_fh:write(string.format("DA:%d,%d\n", line_nr, hits))
+      lines_found = lines_found + 1
+      if hits > 0 then
+         lines_hit = lines_hit + 1
+      end
+   end
+end
+lcov_fh:write(string.format("LF:%d\n", lines_found))
+lcov_fh:write(string.format("LH:%d\n", lines_hit))
+lcov_fh:write("end_of_record\n")
+lcov_fh:close()
+
+local verify_fh = assert(io.open(tick_lcov_file, "r"))
+local lcov_content = verify_fh:read("*a")
+verify_fh:close()
+if not lcov_content:match("BRDA:") then
+   fail("tick-mode LCOV file does not contain BRDA records")
+end
+if not lcov_content:match("BRF:%d+") or not lcov_content:match("BRH:%d+") then
+   fail("tick-mode LCOV file does not contain BRF/BRH summary records")
+end
+if not lcov_content:match("DA:%d+,%d+") or not lcov_content:match("LF:%d+") then
+   fail("tick-mode LCOV file does not contain valid line records")
+end
+ok("tick-mode LCOV records written to %s (BRF=%d, BRH=%d, LF=%d, LH=%d)",
+   tick_lcov_file, branches_found, branches_hit, lines_found, lines_hit)
+
+print("=== Step 7: Generating tick-mode branch HTML report ===")
+
+os.execute("rm -rf " .. tick_html_dir .. " && mkdir -p " .. tick_html_dir)
+local genhtml_cmd = string.format(
+   "genhtml --quiet --legend --branch-coverage --title %q --output-directory %q %q 2>&1",
+   "cluacov tick-mode branch coverage E2E",
+   tick_html_dir,
+   tick_lcov_file)
+
+local pipe = io.popen(genhtml_cmd .. "; echo __EXIT__:$?")
+local genhtml_out = pipe:read("*a")
+pipe:close()
+
+local genhtml_exit = genhtml_out:match("__EXIT__:(%d+)")
+if genhtml_exit == "0" then
+   local index_html = tick_html_dir .. "/index.html"
+   local index_fh = io.open(index_html, "r")
+   if not index_fh then
+      fail("genhtml succeeded but %s not found", index_html)
+   end
+   index_fh:close()
+   ok("tick-mode branch HTML report generated: %s", index_html)
+else
+   -- Keep local development lightweight when lcov/genhtml is not installed.
+   -- CI installs lcov in coverage.yml, so this path should not be taken there.
+   io.stderr:write("WARN: genhtml not available or failed (exit=" ..
+      tostring(genhtml_exit) .. "); skipping tick-mode HTML report.\n")
+   io.stderr:write(genhtml_out)
+end
 
 -- Reset cleanup: a second start() without tick should not somehow
 -- inherit the tick config. We don't crash here, just assert a sanity

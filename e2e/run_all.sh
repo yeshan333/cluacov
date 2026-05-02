@@ -88,6 +88,7 @@ if [[ -d "$output_dir" ]]; then
    # Collect ONLY the top-level index.html of each scenario:
    #   output/html/index.html                       (branch_coverage)
    #   output/runner_shutdown/html/index.html       (runner_shutdown)
+   #   output/tick_branch/html/index.html           (tick_branch)
    #   output/multi_source/html/index.html          (multi_source)
    # genhtml also creates nested per-directory index.html files; we
    # don't list those here — users can drill down from the scenario
@@ -136,6 +137,10 @@ if [[ -d "$output_dir" ]]; then
                runner_shutdown/html/index.html)
                   label="Runner shutdown (__gc finalizer path)"
                   desc="Regression report for the __gc shutdown SIGSEGV bug — produced by <code>e2e_runner_shutdown.lua</code>"
+                  ;;
+               tick_branch/html/index.html)
+                  label="Tick-mode branch coverage"
+                  desc="Tick save_stats + per-PC branchcov + LCOV/genhtml — produced by <code>e2e_tick_mode.lua</code>"
                   ;;
                multi_source/html/index.html)
                   label="Multi-source aggregation"
