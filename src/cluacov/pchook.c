@@ -728,7 +728,34 @@ static void collect_line_hits_recursive(
             lua_Integer count = lua_tointeger(L, -1);
             lua_pop(L, 1);
 
-            line = get_pc_line(proto, pc);
+            /*
+             * Map "next-instruction PC" (the hits-table key) back to the source
+             * line of the instruction that ACTUALLY executed.
+             *
+             * The hits table key is `savedpc - proto->code`, which by Lua's
+             * convention (luaG_traceexec in ldebug.c does `pc++; ci->u.l.savedpc = pc;`
+             * BEFORE invoking any hook) is the PC of the NEXT instruction to
+             * execute, not the one that just ran. This convention is preserved
+             * here at the storage layer so that branchcov.lua can keep using
+             * `proto_hits[target.pc]` (where target.pc is a jump-target PC,
+             * also expressed as a "next-to-execute" PC) without modification.
+             *
+             * For LINE-level coverage, however, we want the line of the
+             * instruction that just ran. This is the same convention Lua
+             * itself uses internally - see `pcRel(pc, p)` in src/ldebug.h:
+             *
+             *     #define pcRel(pc, p)  (cast_int((pc) - (p)->code) - 1)
+             *
+             * Without this `pc - 1` shift, the first executable line of every
+             * function body shows hits = 0 (e.g. `local t = obj.field` at the
+             * top of a function), and the line after it gets double-counted.
+             *
+             * pc == 0 is skipped: there is no "previous" instruction inside
+             * this Proto for the hook to credit (the count belongs to the
+             * caller's frame).
+             */
+            if (pc <= 0) continue;
+            line = get_pc_line(proto, pc - 1);
             if (line <= 0) continue;
 
             lua_rawgeti(L, result_idx, line);

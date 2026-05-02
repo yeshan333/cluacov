@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Bug fixes
+
+- `cluacov.pchook`: function-body first executable line now reports
+  correct hit counts in `pchook.get_line_hits` (and therefore in any
+  LCOV report built from it). Previously, statements like
+  `local t = obj.field` at the top of a function — and the first
+  statement inside an `if`-block, and the closing `end` of `for`
+  loops — consistently showed `hits = 0` while the next line absorbed
+  the missing hits. Root cause: `collect_line_hits_recursive` was
+  reading the hits-table key as the executed instruction's PC, but
+  by Lua's interpreter convention the key is the **next**
+  instruction's PC. Affects PUC-Rio Lua 5.4 and 5.5. Per-PC branch
+  coverage (`branchcov.lua`, `pchook.get_hits`) is intentionally left
+  unchanged: it correctly relies on the next-instruction-PC contract.
+  See `docs/bugs/2026-05-02-savedpc-off-by-one.md` for the full
+  post-mortem.
+
 ## Releasing new versions
 
 - update changelog below

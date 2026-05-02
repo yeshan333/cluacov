@@ -96,4 +96,35 @@ function M.mixed_logic(x, y)
    end
 end
 
+-- Regression target: function-body first line must be HIT.
+-- Before the savedpc-off-by-one fix in collect_line_hits_recursive,
+-- the very first executable line of a function body (`local t = ...`
+-- right after the function header) was reported with hits = 0,
+-- because the hits-table key (savedpc - code) is the NEXT instruction's
+-- PC and the line aggregator was reading it without the -1 shift.
+function M.first_line_local(cobj)
+   local t = cobj.kind            -- regression: function-body first line
+   if t == "ok" then
+      return "ok:" .. t
+   end
+   return "skip"
+end
+
+-- Regression target: first executable line INSIDE an if-block.
+-- Same root cause as above. Before the fix this `local cleaned = v` line
+-- consistently reported 0, even though the if-block was clearly entered
+-- (the next line, `out[#out+1] = cleaned`, absorbed the missing hits).
+-- Mirrors the real-world pattern from Path.join_path that triggered
+-- the original bug report.
+function M.if_block_first_line(items)
+   local out = {}
+   for _, v in ipairs(items) do
+      if type(v) == "string" then
+         local cleaned = v        -- regression: if-block first line
+         out[#out + 1] = cleaned
+      end
+   end
+   return out
+end
+
 return M

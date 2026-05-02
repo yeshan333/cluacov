@@ -35,4 +35,12 @@ assert(sample.all_truthy(true, true, false) == "not all")
 -- Exercise mixed_logic: only x>0 and y>0 path
 assert(sample.mixed_logic(5, 3) == "match")
 
+-- Regression: exercise function-body first line and if-block first line.
+-- These call paths drive the assertions added at the bottom of
+-- e2e_branch_coverage.lua to guard against the savedpc off-by-one bug.
+assert(sample.first_line_local({kind = "ok"}) == "ok:ok")
+assert(sample.first_line_local({kind = "no"}) == "skip")
+local out = sample.if_block_first_line({"a", "b", "c"})
+assert(#out == 3 and out[1] == "a" and out[2] == "b" and out[3] == "c")
+
 print("E2E test passed")

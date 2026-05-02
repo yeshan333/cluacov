@@ -227,4 +227,40 @@ for _, b in ipairs(result.branches) do
 end
 assert_eq("all_truthy (and): 3 branch sites on line 84", line_84_count, 3)
 
+-- ---------------------------------------------------------------------------
+-- Regression: savedpc off-by-one in collect_line_hits_recursive.
+--
+-- Before the fix, the very first executable line of a function body, and
+-- the first executable line inside any if-block, both reported hits = 0
+-- in get_line_hits / branchcov.get_line_hits, even when the function/block
+-- was clearly executed (the next line absorbed the missing hits).
+--
+-- These four assertions lock in the fix end-to-end (branchcov -> LCOV).
+-- They MUST stay in sync with the line numbers in e2e/sample.lua:
+--
+--   L30  `local total = 0`         (M.sum, function-body first line)
+--   L31  `for i = 1, #t do`        (M.sum, line that holds the loop init)
+--   L106 `local t = cobj.kind`     (M.first_line_local, function-body first)
+--   L123 `local cleaned = v`       (M.if_block_first_line, if-block first)
+-- ---------------------------------------------------------------------------
+
+local function line_hit_count(line_nr)
+   return line_hits[line_nr] or 0
+end
+
+assert_eq("regression: M.sum first line `local total = 0` (L30) hit",
+   line_hit_count(30) > 0, true)
+assert_eq("regression: M.first_line_local body first line `local t = cobj.kind` (L106) hit",
+   line_hit_count(106) > 0, true)
+assert_eq("regression: M.if_block_first_line if-block first line `local cleaned = v` (L123) hit",
+   line_hit_count(123) >= 3, true)
+
+-- Stronger guard: in the buggy version, hits were *shifted* by one source
+-- line. The line right after the function-body first line ended up with
+-- the hit count that should have belonged to the first line. Verify the
+-- distribution is plausible (the first line was hit at least as many
+-- times as a sentinel line we know is conditionally executed).
+assert_eq("regression: M.first_line_local body first line >= conditional return line",
+   line_hit_count(106) >= line_hit_count(108), true)
+
 print("\n=== E2E test PASSED ===")
