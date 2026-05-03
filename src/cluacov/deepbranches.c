@@ -161,6 +161,9 @@ static void add_branch_site(
     lua_pushinteger(L, proto->linedefined);
     lua_setfield(L, -2, "linedefined");
 
+    lua_pushinteger(L, proto->lastlinedefined);
+    lua_setfield(L, -2, "lastlinedefined");
+
     lua_pushinteger(L, proto->sizecode);
     lua_setfield(L, -2, "sizecode");
 

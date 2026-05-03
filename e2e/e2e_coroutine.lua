@@ -2,14 +2,12 @@
 --
 -- E2E test for coverage collection across coroutine boundaries.
 --
--- `lua_sethook` binds the hook to the lua_State it was called on, and
--- coroutines run on their OWN lua_State (the `co` thread). Whether
--- pchook hits are recorded for code that runs INSIDE a coroutine is
--- therefore implementation-defined and platform/version-dependent.
+-- On supported PUC-Rio Lua runtimes, coroutines created after
+-- `pchook.start()` inherit the active hook state. This scenario locks
+-- that behavior down and verifies the aggregate output remains sane.
 --
 -- This script:
---   1. Pins down the actual current behavior so future regressions are
---      caught (whichever direction the behavior changes).
+--   1. Verifies coroutine-executed Lua code contributes coverage.
 --   2. Verifies that pchook NEVER crashes on coroutine workloads, even
 --      when the coroutine yields and resumes many times.
 --   3. Verifies main-thread coverage continues to work alongside
@@ -108,32 +106,18 @@ if classify_main_hits < 50 then
 end
 ok("main-thread M.classify line 4 hit %d times (>= 50)", classify_main_hits)
 
-print("=== Step 4: Documenting coroutine hit-recording behavior ===")
+print("=== Step 4: Verifying coroutine hit-recording behavior ===")
 
 -- M.abs's body (line 14, `if x < 0 then`) was called 20 times from
--- INSIDE a coroutine. Whether this shows hits depends on hook
--- propagation behavior. We assert one of two acceptable outcomes:
---
---   (a) Hits ARE recorded (hook propagates to coroutines)
---   (b) Hits are NOT recorded (hook is main-thread-only)
---
--- Both are valid; we just want to FREEZE the current behavior so it
--- doesn't silently flip. If you change hook propagation in pchook.c,
--- update this assertion intentionally.
+-- INSIDE a coroutine. Those hits must be present.
 local abs_coro_hits = sample_lines[14] or 0
-if abs_coro_hits >= 20 then
-   ok("coroutine path: hits ARE propagated (line 14 = %d hits)", abs_coro_hits)
-elseif abs_coro_hits == 0 then
-   ok("coroutine path: hits are NOT propagated (line 14 = 0 hits, documented)")
-else
-   -- Partial propagation would be very surprising — fail loud.
-   fail("M.abs line 14 has unexpected partial hit count from coroutine: %d",
-      abs_coro_hits)
+if abs_coro_hits < 20 then
+   fail("M.abs line 14 (coroutine): expected >= 20 hits, got %d", abs_coro_hits)
 end
+ok("coroutine path: hits propagated (line 14 = %d hits)", abs_coro_hits)
 
--- Whatever the propagation behavior, the per-source aggregation must
--- remain self-consistent (max field present, hit values are positive
--- integers).
+-- The per-source aggregation must remain self-consistent (max field
+-- present, hit values are positive integers).
 if type(sample_lines.max) ~= "number" or sample_lines.max <= 0 then
    fail("sample_lines.max should be > 0, got %s", tostring(sample_lines.max))
 end

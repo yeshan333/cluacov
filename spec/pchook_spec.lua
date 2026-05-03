@@ -6,6 +6,25 @@ local function load_function(source)
    return assert(load(source))()
 end
 
+local function sum_hits(hits)
+   local total = 0
+   for _, count in pairs(hits) do
+      total = total + count
+   end
+   return total
+end
+
+local function find_proto_entry_by_shape(entries, target)
+   for _, entry in ipairs(entries) do
+      if entry.linedefined == target.linedefined
+         and entry.lastlinedefined == target.lastlinedefined
+         and entry.sizecode == target.sizecode
+      then
+         return entry
+      end
+   end
+end
+
 describe("pchook", function()
    after_each(function()
       pchook.stop()
@@ -30,12 +49,70 @@ describe("pchook", function()
             end)
          end)
 
-         it("can be started multiple times", function()
-            assert.has_no.errors(function()
-               pchook.start()
-               pchook.start()
-               pchook.stop()
-            end)
+         it("treats repeated start as idempotent for the active session", function()
+            local func = load_function([[
+               return function(x)
+                  local y = x + 1
+                  return y
+               end
+            ]])
+
+            pchook.start()
+            func(1)
+            pchook.start()
+            func(2)
+            pchook.stop()
+
+            local per_func = pchook.get_hits(func)
+            assert.equal(1, #per_func)
+
+            local source_entries
+            for _, entries in pairs(pchook.get_all_hits()) do
+               local match = find_proto_entry_by_shape(entries, per_func[1])
+               if match then
+                  source_entries = entries
+                  break
+               end
+            end
+
+            assert.is_table(source_entries)
+            assert.equal(1, #source_entries)
+            assert.equal(sum_hits(per_func[1].hits), sum_hits(source_entries[1].hits))
+            assert.is_true(sum_hits(per_func[1].hits) > 0)
+         end)
+
+         it("preserves cumulative hits across stop/start until reset", function()
+            local func = load_function([[
+               return function(x)
+                  local y = x + 1
+                  return y
+               end
+            ]])
+
+            pchook.start()
+            func(1)
+            pchook.stop()
+
+            pchook.start()
+            func(2)
+            pchook.stop()
+
+            local per_func = pchook.get_hits(func)
+            assert.equal(1, #per_func)
+
+            local source_entry
+            local proto_lists = pchook.get_all_hits()
+            for _, entries in pairs(proto_lists) do
+               source_entry = find_proto_entry_by_shape(entries, per_func[1])
+               if source_entry then
+                  assert.equal(1, #entries)
+                  break
+               end
+            end
+
+            assert.is_table(source_entry)
+            assert.equal(sum_hits(per_func[1].hits), sum_hits(source_entry.hits))
+            assert.is_true(sum_hits(per_func[1].hits) >= 2)
          end)
       end)
 
@@ -1216,12 +1293,11 @@ describe("pchook", function()
          -- current implementation exhibits so a future change cannot
          -- silently invalidate downstream coverage reports.
 
-         it("either records hits inside coroutine bodies or leaves them empty (documented)", function()
-            -- We do not assert "must record" because hook propagation
-            -- to new threads is implementation-defined here. We DO
-            -- assert: pchook must not crash, must continue to record
-            -- main-thread hits, and the per-source aggregation must
-            -- remain self-consistent.
+         it("records hits inside coroutine bodies created after start", function()
+            -- On supported PUC-Rio Lua versions, a coroutine created
+            -- after pchook.start() inherits the active hook state.
+            -- Lock that behavior down so coroutine-heavy codebases do
+            -- not silently lose coverage.
             local main_func = load_function([[
                return function()
                   local marker_main = 1
@@ -1256,8 +1332,7 @@ describe("pchook", function()
             assert.is_true(ok2)
             assert.equal(2, v2)
 
-            -- Main-thread function must have hits regardless of
-            -- coroutine hook propagation.
+            -- Main-thread function must still be covered.
             local main_lines = pchook.get_line_hits(main_func)
             local main_max = 0
             for k, v in pairs(main_lines) do
@@ -1265,13 +1340,16 @@ describe("pchook", function()
             end
             assert.is_true(main_max >= 1)
 
-            -- get_all_hits must not crash and must contain at least
-            -- the main_func's source.
-            local all_hits = pchook.get_all_hits()
-            assert.is_table(all_hits)
-            local has_any_source = false
-            for _ in pairs(all_hits) do has_any_source = true; break end
-            assert.is_true(has_any_source)
+            -- Coroutine wrapper itself runs on the main thread, and
+            -- the yielded body must contribute its own line hits.
+            local co_lines = pchook.get_line_hits(co_func)
+            local yielded_line_hits = 0
+            for k, v in pairs(co_lines) do
+               if type(k) == "number" and (k == 4 or k == 6) then
+                  yielded_line_hits = yielded_line_hits + v
+               end
+            end
+            assert.is_true(yielded_line_hits >= 2)
          end)
       end)
 

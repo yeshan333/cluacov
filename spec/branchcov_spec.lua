@@ -38,6 +38,78 @@ describe("branchcov", function()
             assert.is_true(result.total > 0)
          end)
 
+         it("distinguishes protos that only differ by lastlinedefined", function()
+            local saved_branchcov = package.loaded["cluacov.branchcov"]
+            local saved_deepbranches = package.loaded["cluacov.deepbranches"]
+            local saved_pchook = package.loaded["cluacov.pchook"]
+
+            package.loaded["cluacov.branchcov"] = nil
+            package.loaded["cluacov.deepbranches"] = {
+               get = function()
+                  return {
+                     {
+                        line = 10,
+                        pc = 1,
+                        kind = "test",
+                        linedefined = 3,
+                        lastlinedefined = 5,
+                        sizecode = 7,
+                        targets = {
+                           { pc = 2, line = 11 },
+                           { pc = 3, line = 12 },
+                        },
+                     },
+                     {
+                        line = 20,
+                        pc = 1,
+                        kind = "test",
+                        linedefined = 3,
+                        lastlinedefined = 8,
+                        sizecode = 7,
+                        targets = {
+                           { pc = 2, line = 21 },
+                           { pc = 3, line = 22 },
+                        },
+                     },
+                  }
+               end,
+            }
+            package.loaded["cluacov.pchook"] = {
+               get_hits = function()
+                  return {
+                     {
+                        linedefined = 3,
+                        lastlinedefined = 5,
+                        sizecode = 7,
+                        hits = { [1] = 1, [2] = 4 },
+                     },
+                     {
+                        linedefined = 3,
+                        lastlinedefined = 8,
+                        sizecode = 7,
+                        hits = { [1] = 1, [3] = 6 },
+                     },
+                  }
+               end,
+               get_line_hits = function()
+                  return {}
+               end,
+            }
+
+            local fake_branchcov = require("cluacov.branchcov")
+            local result = fake_branchcov.analyze(function() end)
+
+            package.loaded["cluacov.branchcov"] = saved_branchcov
+            package.loaded["cluacov.deepbranches"] = saved_deepbranches
+            package.loaded["cluacov.pchook"] = saved_pchook
+
+            assert.equal(2, #result.branches)
+            assert.equal(4, result.branches[1].targets[1].hits)
+            assert.equal(0, result.branches[1].targets[2].hits)
+            assert.equal(0, result.branches[2].targets[1].hits)
+            assert.equal(6, result.branches[2].targets[2].hits)
+         end)
+
          it("detects partial coverage for if/else", function()
             local func = load_function([[
                return function(x)

@@ -1,5 +1,6 @@
 #include "lua.h"
 #include "lauxlib.h"
+#include <string.h>
 
 #if LUA_VERSION_NUM > 501 || defined(LUAI_BITSINT)
 #define PUCRIOLUA
@@ -53,6 +54,7 @@ static char PROTO_INDEX_KEY;
 static char TICK_KEY;
 static char SNAPSHOT_LINE_HITS_KEY;
 static char SNAPSHOT_ALL_HITS_KEY;
+static char HOOK_ACTIVE_KEY;
 
 static Proto *get_proto(lua_State *L, int idx) {
     return ((Closure *) lua_topointer(L, idx))->l.p;
@@ -103,6 +105,11 @@ static const char *get_source_name(const Proto *proto) {
     return getstr(proto->source);
 }
 
+static const char *normalize_source_name(const Proto *proto) {
+    const char *source = get_source_name(proto);
+    return source == NULL ? "?" : source;
+}
+
 /*
  * Materialize per-Proto metadata into a fresh Lua table on top of the stack.
  *
@@ -124,12 +131,8 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
 
     lua_createtable(L, 0, 5);
 
-    source = get_source_name(proto);
-    if (source == NULL) {
-        lua_pushliteral(L, "?");
-    } else {
-        lua_pushstring(L, source);   /* makes a Lua-managed copy */
-    }
+    source = normalize_source_name(proto);
+    lua_pushstring(L, source);   /* makes a Lua-managed copy */
     lua_setfield(L, -2, "source");
 
     lua_pushinteger(L, proto->linedefined);
@@ -157,6 +160,95 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
     lua_setfield(L, -2, "hits");
 }
 
+static int entry_matches_proto(lua_State *L, int entry_idx, const Proto *proto) {
+    int pc;
+    int lines_idx;
+    const char *entry_source;
+    const char *proto_source = normalize_source_name(proto);
+
+    lua_getfield(L, entry_idx, "linedefined");
+    if (lua_tointeger(L, -1) != (lua_Integer)proto->linedefined) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, entry_idx, "lastlinedefined");
+    if (lua_tointeger(L, -1) != (lua_Integer)proto->lastlinedefined) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, entry_idx, "sizecode");
+    if (lua_tointeger(L, -1) != (lua_Integer)proto->sizecode) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, entry_idx, "source");
+    entry_source = lua_tostring(L, -1);
+    if (entry_source == NULL || strcmp(entry_source, proto_source) != 0) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, entry_idx, "lines");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lines_idx = lua_gettop(L);
+
+    for (pc = 0; pc < proto->sizecode; pc++) {
+        int proto_line = get_pc_line(proto, pc);
+        int entry_line;
+
+        lua_rawgeti(L, lines_idx, pc);
+        entry_line = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+
+        if (entry_line != proto_line) {
+            lua_pop(L, 1);
+            return 0;
+        }
+    }
+
+    lua_pop(L, 1);
+    return 1;
+}
+
+static lua_Integer find_matching_entry_id(
+    lua_State *L,
+    int pchook_idx,
+    const Proto *proto
+) {
+    lua_Integer entry_id;
+    int n = (int)lua_rawlen(L, pchook_idx);
+
+    for (entry_id = 1; entry_id <= n; entry_id++) {
+        int entry_idx;
+
+        lua_rawgeti(L, pchook_idx, entry_id);
+        if (!lua_istable(L, -1)) {
+            lua_pop(L, 1);
+            continue;
+        }
+        entry_idx = lua_gettop(L);
+
+        if (entry_matches_proto(L, entry_idx, proto)) {
+            lua_pop(L, 1);
+            return entry_id;
+        }
+
+        lua_pop(L, 1);
+    }
+
+    return 0;
+}
+
 /*
  * Look up (or create) the entry-id for the given Proto* in PROTO_INDEX_KEY,
  * also ensuring PCHOOK_KEY[entry_id] holds the materialized entry table.
@@ -172,9 +264,15 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
  *   reuse a freed Proto's address for a brand-new Proto.  Without
  *   validation, the old mapping would silently route the new Proto's
  *   hits into the old entry — wrong source, wrong line table, wrong
- *   hit counts.  We detect this by comparing the stored entry's
- *   (linedefined, sizecode) with the live Proto: a mismatch means the
- *   address was recycled and we must create a fresh entry.
+ *   hit counts.  We detect this by comparing the stored entry against the
+ *   live Proto's source, line range, sizecode, and materialized line map.
+ *
+ * Re-indexing after stop()/start():
+ *   start() is cumulative across sessions unless reset() is called. Since
+ *   PROTO_INDEX_KEY is rebuilt on each fresh start, a live Proto may need to
+ *   be re-associated with an existing materialized entry from PCHOOK_KEY.
+ *   When there is no current Proto* mapping, we scan existing entries for an
+ *   exact metadata match before allocating a new one.
  */
 static int push_hits_for_proto(lua_State *L, const Proto *proto) {
     lua_Integer entry_id;
@@ -199,16 +297,12 @@ static int push_hits_for_proto(lua_State *L, const Proto *proto) {
         lua_rawgeti(L, pchook_idx, entry_id);
         entry_idx = lua_gettop(L);
 
-        lua_getfield(L, entry_idx, "linedefined");
-        lua_getfield(L, entry_idx, "sizecode");
-        if (lua_tointeger(L, -2) != (lua_Integer)proto->linedefined ||
-            lua_tointeger(L, -1) != (lua_Integer)proto->sizecode) {
-            /* Stale: drop old entry and fall through to create a new one. */
-            lua_pop(L, 3);  /* sizecode, linedefined, entry */
+        if (!entry_matches_proto(L, entry_idx, proto)) {
+            /* Stale: drop old entry and fall through to re-index/create. */
+            lua_pop(L, 1);  /* entry */
             entry_id = 0;
         } else {
             /* Valid mapping: grab hits from the already-fetched entry. */
-            lua_pop(L, 2);  /* sizecode, linedefined */
             lua_getfield(L, entry_idx, "hits");
             lua_remove(L, entry_idx);   /* drop entry, keep hits */
             lua_remove(L, index_idx);
@@ -217,13 +311,23 @@ static int push_hits_for_proto(lua_State *L, const Proto *proto) {
         }
     }
 
-    /* First time we see this Proto (or stale mapping): append a fresh entry. */
-    entry_id = (lua_Integer)lua_rawlen(L, pchook_idx) + 1;
-    materialize_proto_entry(L, proto);            /* push entry table */
-    lua_rawseti(L, pchook_idx, entry_id);          /* PCHOOK[entry_id] = entry */
+    if (entry_id == 0) {
+        entry_id = find_matching_entry_id(L, pchook_idx, proto);
+        if (entry_id != 0) {
+            lua_pushinteger(L, entry_id);
+            lua_rawsetp(L, index_idx, (const void *)proto);
+        }
+    }
 
-    lua_pushinteger(L, entry_id);
-    lua_rawsetp(L, index_idx, (const void *)proto); /* INDEX[Proto*] = entry_id */
+    /* First time we see this Proto (or unmatched stale mapping): append a fresh entry. */
+    if (entry_id == 0) {
+        entry_id = (lua_Integer)lua_rawlen(L, pchook_idx) + 1;
+        materialize_proto_entry(L, proto);            /* push entry table */
+        lua_rawseti(L, pchook_idx, entry_id);          /* PCHOOK[entry_id] = entry */
+
+        lua_pushinteger(L, entry_id);
+        lua_rawsetp(L, index_idx, (const void *)proto); /* INDEX[Proto*] = entry_id */
+    }
 
     /* Fetch entry, then its hits subtable. */
     lua_rawgeti(L, pchook_idx, entry_id);              /* push entry */
@@ -304,6 +408,13 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx);
 static int l_start(lua_State *L) {
     int mask;
 
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
+    if (!lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    lua_pop(L, 1);
+
     /* Clear stale snapshots from previous stop(). */
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
@@ -369,6 +480,8 @@ static int l_start(lua_State *L) {
     }
 
     lua_sethook(L, pc_hook, mask, 1);
+    lua_pushboolean(L, 1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
     return 0;
 }
 
@@ -378,6 +491,8 @@ static int l_stop(lua_State *L) {
     /* Drop the hook first so no further pc_hook callback can fire. After
        this, PCHOOK entries are guaranteed to be immutable. */
     lua_sethook(L, NULL, 0, 0);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
 
     /* Pre-build snapshots while we still hold the GIL on a healthy state
        (i.e. before any __gc finalizer might run). l_get_all_* will then
@@ -446,6 +561,8 @@ static int l_reset(lua_State *L) {
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
     return 0;
 }
 
@@ -718,10 +835,12 @@ static void collect_proto_hits_recursive(
     lua_Integer entry_id;
     int i;
 
-    /* Build a per-Proto record: { linedefined, sizecode, hits }. */
-    lua_createtable(L, 0, 3);
+    /* Build a per-Proto record: { linedefined, lastlinedefined, sizecode, hits }. */
+    lua_createtable(L, 0, 4);
     lua_pushinteger(L, proto->linedefined);
     lua_setfield(L, -2, "linedefined");
+    lua_pushinteger(L, proto->lastlinedefined);
+    lua_setfield(L, -2, "lastlinedefined");
     lua_pushinteger(L, proto->sizecode);
     lua_setfield(L, -2, "sizecode");
 

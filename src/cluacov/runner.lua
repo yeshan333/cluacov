@@ -121,6 +121,14 @@ local function strip_at(source)
    return nil
 end
 
+local function proto_key(proto)
+   return table.concat({
+      proto.linedefined or 0,
+      proto.lastlinedefined or 0,
+      proto.sizecode or 0,
+   }, ":")
+end
+
 local function resolve_path(filename)
    if filename:sub(1, 1) == "/" then return filename end
    local fh = io.popen("pwd")
@@ -252,7 +260,7 @@ local function write_lcov(config, all_line_hits, all_hits)
 
       local hits_by_ld = {}
       for _, entry in ipairs(proto_list) do
-         local key = entry.linedefined .. ":" .. entry.sizecode
+         local key = proto_key(entry)
          local existing = hits_by_ld[key]
          if existing then
             for pc, count in pairs(entry.hits) do
@@ -270,7 +278,7 @@ local function write_lcov(config, all_line_hits, all_hits)
       local block_id = 0
       local brf, brh = 0, 0
       for _, b in ipairs(branches) do
-         local proto_hits = hits_by_ld[b.linedefined .. ":" .. b.sizecode] or {}
+         local proto_hits = hits_by_ld[proto_key(b)] or {}
          -- b.pc is the branch source instruction (savedpc convention).
          -- If the branch instruction itself was never executed, all
          -- target hit counts are noise from other code paths converging

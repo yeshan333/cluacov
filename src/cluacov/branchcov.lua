@@ -3,13 +3,21 @@ local pchook = require("cluacov.pchook")
 
 local M = {}
 
+local function proto_key(proto)
+   return table.concat({
+      proto.linedefined or 0,
+      proto.lastlinedefined or 0,
+      proto.sizecode or 0,
+   }, ":")
+end
+
 function M.analyze(func)
    local branches = deepbranches.get(func)
    local all_hits = pchook.get_hits(func)
 
    local hits_by_func = {}
    for _, entry in ipairs(all_hits) do
-      hits_by_func[entry.linedefined .. ":" .. entry.sizecode] = entry.hits
+      hits_by_func[proto_key(entry)] = entry.hits
    end
 
    local result_branches = {}
@@ -17,7 +25,7 @@ function M.analyze(func)
    local hit = 0
 
    for _, branch in ipairs(branches) do
-      local proto_hits = hits_by_func[branch.linedefined .. ":" .. branch.sizecode] or {}
+      local proto_hits = hits_by_func[proto_key(branch)] or {}
       local targets = {}
       local targets_hit = 0
 

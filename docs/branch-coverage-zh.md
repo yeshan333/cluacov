@@ -263,7 +263,7 @@ lua e2e/e2e_branch_coverage.lua
 ```lua
 local pchook = require("cluacov.pchook")
 
-pchook.start()                     -- 注册指令级 C hook
+pchook.start()                     -- 注册指令级 C hook（active 期间重复调用是幂等的）
 -- ... 运行被测代码 ...
 pchook.stop()                      -- 移除 hook
 
@@ -273,15 +273,27 @@ pchook.reset()                     -- 清空所有记录数据（采集继续运
 
 `pchook.start()` 调用 `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` 在每条 VM
 指令执行时触发 C 级别回调。回调记录每条指令的 1-based 程序计数器，
-以 `Proto*` 指针为键。
+以 `Proto*` 指针为键。若 hook 已经处于 active 状态，再次调用 `start()`
+不会重置当前采样；`stop()` 后重新 `start()` 会继续累积现有数据，若要开启
+新一轮采样应调用 `reset()`。
 
 `pchook.get_hits(func)` 遍历函数的 Proto 树（包括嵌套函数），
 返回一个条目数组：
 
 ```lua
 {
-    { linedefined = 0, sizecode = 42, hits = { [1] = 5, [3] = 2, ... } },
-    { linedefined = 8, sizecode = 10, hits = { [2] = 3, ... } },
+    {
+        linedefined = 0,
+        lastlinedefined = 12,
+        sizecode = 42,
+        hits = { [1] = 5, [3] = 2, ... },
+    },
+    {
+        linedefined = 8,
+        lastlinedefined = 11,
+        sizecode = 10,
+        hits = { [2] = 3, ... },
+    },
     ...
 }
 ```
@@ -319,7 +331,8 @@ local result = branchcov.analyze(func)
 ### 要求
 
 - 需要 **Lua 5.4+**（通过 vendored 头文件访问 `CallInfo.u.l.savedpc`）
-- 传给 `get_hits` 的函数必须是在 `pchook.start()` 下**实际执行**的同一对象
-  （相同的 `Proto*` 指针）
+- 传给 `get_hits` 的函数必须是在 `pchook.start()` 下**实际执行**过的同一对象
+- 在支持的 PUC-Rio Lua 运行时里，`pchook.start()` 之后创建的 coroutine 会继承
+  当前 hook，因此其函数体执行会计入覆盖率。
 - Lua 5.1–5.3：`pchook.start()` 会报错；`get_hits()` 返回空表
 - LuaJIT：同 5.1–5.3

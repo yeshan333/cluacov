@@ -281,7 +281,7 @@ get independent hit counts, giving 6 branch targets instead of 2.
 ```lua
 local pchook = require("cluacov.pchook")
 
-pchook.start()                     -- register instruction-level C hook
+pchook.start()                     -- register instruction-level C hook (idempotent while active)
 -- ... run code under test ...
 pchook.stop()                      -- remove hook
 
@@ -292,14 +292,27 @@ pchook.reset()                     -- clear all recorded data (collection contin
 `pchook.start()` calls `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` to fire a
 C-level callback on every VM instruction. The callback records the 1-based
 program counter of each executed instruction, keyed by `Proto*` pointer.
+Calling `start()` again while the hook is already active is a no-op. Calling
+`stop()` and then `start()` resumes the same accumulated dataset; use
+`reset()` when you want a fresh collection.
 
 `pchook.get_hits(func)` walks the function's Proto tree (including nested
 functions) and returns an array of entries:
 
 ```lua
 {
-    { linedefined = 0, sizecode = 42, hits = { [1] = 5, [3] = 2, ... } },
-    { linedefined = 8, sizecode = 10, hits = { [2] = 3, ... } },
+    {
+        linedefined = 0,
+        lastlinedefined = 12,
+        sizecode = 42,
+        hits = { [1] = 5, [3] = 2, ... },
+    },
+    {
+        linedefined = 8,
+        lastlinedefined = 11,
+        sizecode = 10,
+        hits = { [2] = 3, ... },
+    },
     ...
 }
 ```
@@ -343,6 +356,8 @@ This is instruction-coverage (was this PC executed?), not edge-coverage
 
 - **Lua 5.4+** required (accesses `CallInfo.u.l.savedpc` via vendored headers)
 - The function passed to `get_hits` must be the **same object** that was
-  executed under `pchook.start()` (same `Proto*` pointer)
+  executed under `pchook.start()`
+- Coroutines created after `pchook.start()` inherit the active hook in the
+  supported PUC-Rio Lua runtimes, so their executed bodies contribute coverage.
 - Lua 5.1–5.3: `pchook.start()` raises an error; `get_hits()` returns empty
 - LuaJIT: same as 5.1–5.3
