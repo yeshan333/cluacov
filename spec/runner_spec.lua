@@ -201,6 +201,243 @@ io.flush()
          assert.equal("NO_ANCHOR", result, "runner._anchor should be nil when tick=true")
       end)
 
+      describe("function coverage (FNDA)", function()
+         local sep = is_windows and "\\" or "/"
+
+         local function write_file(path, content)
+            local fh = assert(io.open(path, "w"))
+            fh:write(content)
+            fh:close()
+         end
+
+         it("reports FNDA:0 for defined-but-uncalled functions", function()
+            local fn_sample = tmpdir .. sep .. "fn_sample.lua"
+            write_file(fn_sample, [[
+local M = {}
+function M.called(x) return x + 1 end
+function M.uncalled(x) return x * 2 end
+function M.also_called(a, b) return a + b end
+return M
+]])
+            local fn_test = tmpdir .. sep .. "fn_test.lua"
+            write_file(fn_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local m = require("fn_sample")
+assert(m.called(1) == 2)
+assert(m.also_called(3, 4) == 7)
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "fn_stats.out"
+            local lcov_f = tmpdir .. sep .. "fn_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_fn"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "fn_sample$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner fn_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner fn_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            -- called and also_called should have FNDA > 0
+            local called_hits = lcov:match("FNDA:(%d+),called\n")
+            assert.is_truthy(called_hits, "FNDA for 'called' should exist")
+            assert.is_true(tonumber(called_hits) > 0,
+               "called() was invoked, FNDA should be > 0")
+
+            local also_called_hits = lcov:match("FNDA:(%d+),also_called\n")
+            assert.is_truthy(also_called_hits, "FNDA for 'also_called' should exist")
+            assert.is_true(tonumber(also_called_hits) > 0,
+               "also_called() was invoked, FNDA should be > 0")
+
+            -- uncalled should have FNDA:0
+            local uncalled_hits = lcov:match("FNDA:(%d+),uncalled\n")
+            assert.is_truthy(uncalled_hits, "FNDA for 'uncalled' should exist")
+            assert.equal(0, tonumber(uncalled_hits),
+               "uncalled() was never invoked, FNDA must be 0")
+         end)
+
+         it("reports correct FNH count excluding uncalled functions", function()
+            local fn2_sample = tmpdir .. sep .. "fn2_sample.lua"
+            write_file(fn2_sample, [[
+local M = {}
+function M.alpha() return "a" end
+function M.beta() return "b" end
+function M.gamma() return "g" end
+return M
+]])
+            local fn2_test = tmpdir .. sep .. "fn2_test.lua"
+            write_file(fn2_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local m = require("fn2_sample")
+assert(m.alpha() == "a")
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "fn2_stats.out"
+            local lcov_f = tmpdir .. sep .. "fn2_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_fn2"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "fn2_sample$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner fn2_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner fn2_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            -- FNF should be 3 (all defined), FNH should be 1 (only alpha called)
+            local fnf = lcov:match("FNF:(%d+)")
+            local fnh = lcov:match("FNH:(%d+)")
+            assert.is_truthy(fnf)
+            assert.is_truthy(fnh)
+            assert.equal(3, tonumber(fnf), "FNF should count all 3 defined functions")
+            assert.equal(1, tonumber(fnh), "FNH should count only the 1 called function")
+         end)
+
+         it("counts multiple calls in FNDA", function()
+            local fn3_sample = tmpdir .. sep .. "fn3_sample.lua"
+            write_file(fn3_sample, [[
+local M = {}
+function M.inc(x) return x + 1 end
+return M
+]])
+            local fn3_test = tmpdir .. sep .. "fn3_test.lua"
+            write_file(fn3_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local m = require("fn3_sample")
+for i = 1, 5 do m.inc(i) end
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "fn3_stats.out"
+            local lcov_f = tmpdir .. sep .. "fn3_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_fn3"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "fn3_sample$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner fn3_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner fn3_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            local inc_hits = lcov:match("FNDA:(%d+),inc\n")
+            assert.is_truthy(inc_hits, "FNDA for 'inc' should exist")
+            assert.is_true(tonumber(inc_hits) >= 5,
+               "inc() called 5 times, FNDA should be >= 5, got " .. inc_hits)
+         end)
+
+         it("reports correct FNDA for vararg functions", function()
+            local fn4_sample = tmpdir .. sep .. "fn4_sample.lua"
+            write_file(fn4_sample, [[
+local M = {}
+function M.sum_args(...)
+   local n = select("#", ...)
+   local s = 0
+   for i = 1, n do s = s + select(i, ...) end
+   return s
+end
+function M.plain(x) return x end
+return M
+]])
+            local fn4_test = tmpdir .. sep .. "fn4_test.lua"
+            write_file(fn4_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local m = require("fn4_sample")
+assert(m.sum_args(1, 2, 3) == 6)
+assert(m.sum_args(10) == 10)
+assert(m.plain(42) == 42)
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "fn4_stats.out"
+            local lcov_f = tmpdir .. sep .. "fn4_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_fn4"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "fn4_sample$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner fn4_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner fn4_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            -- Vararg function sum_args called twice: FNDA >= 2
+            local va_hits = lcov:match("FNDA:(%d+),sum_args\n")
+            assert.is_truthy(va_hits, "FNDA for 'sum_args' should exist")
+            assert.is_true(tonumber(va_hits) >= 2,
+               "sum_args() called 2 times, FNDA should be >= 2, got " .. va_hits)
+
+            -- Plain function also works
+            local plain_hits = lcov:match("FNDA:(%d+),plain\n")
+            assert.is_truthy(plain_hits, "FNDA for 'plain' should exist")
+            assert.is_true(tonumber(plain_hits) >= 1,
+               "plain() called 1 time, FNDA should be >= 1, got " .. plain_hits)
+         end)
+      end)
+
       describe("config loading", function()
          local sep = is_windows and "\\" or "/"
 

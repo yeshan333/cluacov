@@ -36,6 +36,7 @@ export LUA_CPATH="./?.so;./cluacov/?.so;${LUA_CPATH:-};;"
 
 scripts=(
    "e2e_branch_coverage.lua"
+   "e2e_function_coverage.lua"
    "e2e_line_hook.lua"
    "e2e_runner_shutdown.lua"
    "e2e_tick_mode.lua"

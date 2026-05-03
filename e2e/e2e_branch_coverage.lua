@@ -144,9 +144,27 @@ end
 
 lcov_fh:write(string.format("FNF:%d\n", #func_defs))
 
+-- Build lookup: linedefined -> call count from proto body hits.
+-- A function is only counted as "called" when its Proto's body
+-- was actually entered, not merely when the OP_CLOSURE instruction
+-- at the definition site executed.
+-- Normal functions: hits[1]; vararg functions (OP_VARARGPREP at PC 0
+-- skips the count hook): fall back to hits[2].
+local proto_hits = pchook.get_hits(sample_func)
+local fn_call_counts = {}
+for _, entry in ipairs(proto_hits) do
+   local ld = entry.linedefined
+   if ld > 0 then
+      local count = entry.hits[1] or entry.hits[2] or 0
+      if count > 0 then
+         fn_call_counts[ld] = (fn_call_counts[ld] or 0) + count
+      end
+   end
+end
+
 local fns_hit = 0
 for _, fd in ipairs(func_defs) do
-   local hits = line_hits[fd.line] or 0
+   local hits = fn_call_counts[fd.line] or 0
    lcov_fh:write(string.format("FNDA:%d,%s\n", hits, fd.name))
    if hits > 0 then fns_hit = fns_hit + 1 end
 end
@@ -173,6 +191,15 @@ lcov_fh:write(string.format("BRF:%d\n", branches_found))
 lcov_fh:write(string.format("BRH:%d\n", branches_hit))
 
 -- Line coverage: DA records
+-- Zero out definition lines of uncalled functions: the hit there is
+-- merely OP_CLOSURE in the parent chunk, not an actual call.
+local uncalled_def_lines = {}
+for _, fd in ipairs(func_defs) do
+   if not fn_call_counts[fd.line] then
+      uncalled_def_lines[fd.line] = true
+   end
+end
+
 local lines_found = 0
 local lines_hit = 0
 
@@ -182,6 +209,7 @@ local active_lines = deepactivelines.get(sample_func)
 for line_nr = 1, line_hits.max or 0 do
    if active_lines[line_nr] then
       local hits = line_hits[line_nr] or 0
+      if uncalled_def_lines[line_nr] then hits = 0 end
       lcov_fh:write(string.format("DA:%d,%d\n", line_nr, hits))
       lines_found = lines_found + 1
       if hits > 0 then lines_hit = lines_hit + 1 end

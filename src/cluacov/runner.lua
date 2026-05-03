@@ -223,9 +223,28 @@ local function write_lcov(config, all_line_hits, all_hits)
       end
       fd:write(string.format("FNF:%d\n", #func_defs))
 
+      -- Build lookup: linedefined -> call count from proto body hits.
+      -- A function is only counted as "called" when its Proto's body
+      -- was actually entered, not merely when the OP_CLOSURE instruction
+      -- at the definition site executed.
+      -- Normal functions record their entry-point hit at hits[1] (PC 0
+      -- produces savedpc 1). Vararg functions have OP_VARARGPREP at PC 0
+      -- which does not trigger the count hook, so hits[1] is absent and
+      -- the first recorded hit is hits[2]. Fall back accordingly.
+      local fn_call_counts = {}
+      for _, entry in ipairs(proto_list) do
+         local ld = entry.linedefined
+         if ld > 0 then
+            local count = entry.hits[1] or entry.hits[2] or 0
+            if count > 0 then
+               fn_call_counts[ld] = (fn_call_counts[ld] or 0) + count
+            end
+         end
+      end
+
       local fns_hit = 0
       for _, fn in ipairs(func_defs) do
-         local hits = line_data[fn.line] or 0
+         local hits = fn_call_counts[fn.line] or 0
          fd:write(string.format("FNDA:%d,%s\n", hits, fn.name))
          if hits > 0 then fns_hit = fns_hit + 1 end
       end
@@ -253,11 +272,22 @@ local function write_lcov(config, all_line_hits, all_hits)
       fd:write(string.format("BRF:%d\n", brf))
       fd:write(string.format("BRH:%d\n", brh))
 
+      -- Collect definition lines of uncalled functions. The hit on these
+      -- lines comes from OP_CLOSURE in the parent chunk, not from the
+      -- function being entered, so it should not count as line coverage.
+      local uncalled_def_lines = {}
+      for _, fn in ipairs(func_defs) do
+         if not fn_call_counts[fn.line] then
+            uncalled_def_lines[fn.line] = true
+         end
+      end
+
       local lf, lh = 0, 0
       local max = line_data.max or 0
       for line_nr = 1, max do
          if active_lines[line_nr] then
             local hits = line_data[line_nr] or 0
+            if uncalled_def_lines[line_nr] then hits = 0 end
             fd:write(string.format("DA:%d,%d\n", line_nr, hits))
             lf = lf + 1
             if hits > 0 then lh = lh + 1 end
