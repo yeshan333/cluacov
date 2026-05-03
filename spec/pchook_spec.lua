@@ -645,6 +645,109 @@ describe("pchook", function()
             assert.is_true(found)
          end)
 
+         describe("regression: aggregate savedpc off-by-one (must agree with get_line_hits)", function()
+            -- aggregate_all_line_hits (used by get_all_line_hits) previously
+            -- mapped hits[pc] to lines[pc] instead of lines[pc-1]. Since the
+            -- hits-table key is the savedpc offset (= next instruction's PC),
+            -- the correct source line is that of instruction pc-1. The bug was
+            -- invisible when consecutive instructions shared the same line, but
+            -- it caused mis-attribution wherever adjacent instructions mapped
+            -- to different lines (e.g. CLOSURE/SETFIELD pairs in a module's
+            -- top-level chunk, or multi-statement function bodies).
+
+            it("matches get_line_hits for a multi-statement function body", function()
+               local func = load_function([[
+                  return function(x)
+                     local a = x + 1
+                     local b = a * 2
+                     local c = b - 3
+                     if c > 0 then
+                        return c
+                     end
+                     return 0
+                  end
+               ]])
+
+               pchook.start()
+               for _ = 1, 5 do func(10) end
+               -- get_line_hits uses collect_line_hits_recursive (known correct)
+               local per_func = pchook.get_line_hits(func)
+               pchook.stop()
+
+               -- get_all_line_hits uses aggregate_all_line_hits (had the bug)
+               local all = pchook.get_all_line_hits()
+
+               -- Find the source entry matching our load-string chunk
+               local agg
+               for source, lines in pairs(all) do
+                  if type(lines) == "table" and lines.max then
+                     -- Our function is the only one executed; pick
+                     -- whichever source has the matching max
+                     if lines.max == per_func.max then
+                        agg = lines
+                        break
+                     end
+                  end
+               end
+               assert.is_table(agg, "aggregate source entry must exist")
+
+               -- Every non-zero line in per_func must appear in agg with
+               -- the same (or higher) count, and vice versa.
+               for line_nr = 1, per_func.max do
+                  local pf = per_func[line_nr] or 0
+                  local ag = agg[line_nr] or 0
+                  if pf > 0 then
+                     assert.is_true(ag > 0,
+                        "line " .. line_nr .. ": get_line_hits=" .. pf
+                        .. " but get_all_line_hits=" .. ag)
+                  end
+               end
+            end)
+
+            it("does not shift hits to the next instruction's line", function()
+               -- Two consecutive single-line statements compiled to
+               -- instructions on DIFFERENT lines. With the old bug,
+               -- statement A's hit count would appear on statement B's
+               -- line instead of A's.
+               local func = load_function([[
+                  return function(n)
+                     local sum = 0
+                     for i = 1, n do
+                        sum = sum + i
+                     end
+                     return sum
+                  end
+               ]])
+
+               pchook.start()
+               func(10)
+               local per_func = pchook.get_line_hits(func)
+               pchook.stop()
+
+               local all = pchook.get_all_line_hits()
+               local agg
+               for _, lines in pairs(all) do
+                  if type(lines) == "table" and lines.max == per_func.max then
+                     agg = lines
+                     break
+                  end
+               end
+               assert.is_table(agg)
+
+               -- The loop body line (sum = sum + i) must have 10 hits in
+               -- BOTH APIs, not just in get_line_hits.
+               local found_10_in_agg = false
+               for line_nr = 1, agg.max do
+                  if (agg[line_nr] or 0) >= 10 then
+                     found_10_in_agg = true
+                     break
+                  end
+               end
+               assert.is_true(found_10_in_agg,
+                  "aggregate must have a line with >= 10 hits (loop body)")
+            end)
+         end)
+
          it("aggregates line hits from multiple protos in same source", function()
             local func = load_function([[
                return function()
@@ -668,6 +771,71 @@ describe("pchook", function()
                end
             end
             assert.is_true(total_hit >= 3)
+         end)
+
+         it("sums DA across multiple loadfile of the same source (not MAX)", function()
+            -- When the same file is loaded N times (e.g. busted clearing
+            -- package.loaded between spec files), each load creates separate
+            -- Proto objects. DA must SUM across proto instances, not MAX.
+            local tmp = os.tmpname() .. ".lua"
+            local fh = assert(io.open(tmp, "w"))
+            fh:write("local M = {}\nfunction M.foo()\n   return 1\nend\nreturn M\n")
+            fh:close()
+            pchook.start()
+            local m1 = assert(loadfile(tmp))()
+            m1.foo(); m1.foo(); m1.foo()  -- 3 calls
+            local m2 = assert(loadfile(tmp))()
+            m2.foo(); m2.foo()  -- 2 calls
+            pchook.stop()
+            local data = pchook.get_all_line_hits()["@" .. tmp]
+            assert.is_table(data)
+            -- line 3 ("return 1") must be 5 (3+2), not 3 (max)
+            assert.equal(5, data[3])
+            os.remove(tmp)
+         end)
+      end)
+
+      describe("get_func_defs", function()
+         it("returns linedefined and lastlinedefined for all child protos", function()
+            local chunk = assert(load([[
+               local M = {}
+               function M.foo()
+                  return 1
+               end
+               function M.bar(x)
+                  return x + 1
+               end
+               return M
+            ]]))
+            local defs = pchook.get_func_defs(chunk)
+            assert.is_table(defs)
+            assert.equal(2, #defs)
+            for _, def in ipairs(defs) do
+               assert.is_number(def.linedefined)
+               assert.is_number(def.lastlinedefined)
+               assert.is_true(def.linedefined > 0)
+               assert.is_true(def.lastlinedefined >= def.linedefined)
+            end
+         end)
+
+         it("skips the top-level chunk (linedefined == 0)", function()
+            local chunk = assert(load("return 1"))
+            local defs = pchook.get_func_defs(chunk)
+            assert.equal(0, #defs)
+         end)
+
+         it("includes nested inner functions", function()
+            local chunk = assert(load([[
+               return function()
+                  local function inner()
+                     return 42
+                  end
+                  return inner()
+               end
+            ]]))
+            local defs = pchook.get_func_defs(chunk)
+            -- outer function + inner function
+            assert.equal(2, #defs)
          end)
       end)
 

@@ -436,6 +436,156 @@ return {
             assert.is_true(tonumber(plain_hits) >= 1,
                "plain() called 1 time, FNDA should be >= 1, got " .. plain_hits)
          end)
+
+         it("zeroes DA on both definition and end lines of uncalled multi-line functions", function()
+            local fn5_sample = tmpdir .. sep .. "fn5_endline.lua"
+            write_file(fn5_sample, [[
+local M = {}
+function M.called()
+   return 1
+end
+function M.uncalled()
+   return 2
+end
+return M
+]])
+            local fn5_test = tmpdir .. sep .. "fn5_test.lua"
+            write_file(fn5_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local m = require("fn5_endline")
+assert(m.called() == 1)
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "fn5_stats.out"
+            local lcov_f = tmpdir .. sep .. "fn5_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_fn5"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "fn5_endline$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner fn5_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner fn5_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            -- uncalled function: FNDA:0
+            local uncalled_fnda = lcov:match("FNDA:(%d+),uncalled\n")
+            assert.is_truthy(uncalled_fnda)
+            assert.equal(0, tonumber(uncalled_fnda))
+
+            -- The definition line (line 5: "function M.uncalled()") must be DA:5,0
+            local def_da = lcov:match("DA:5,(%d+)")
+            assert.is_truthy(def_da, "DA for definition line 5 should exist")
+            assert.equal(0, tonumber(def_da),
+               "definition line of uncalled function must be DA:0, got " .. def_da)
+
+            -- The end line (line 7: "end") must also be DA:7,0
+            local end_da = lcov:match("DA:7,(%d+)")
+            assert.is_truthy(end_da, "DA for end line 7 should exist")
+            assert.equal(0, tonumber(end_da),
+               "end line of uncalled function must be DA:0, got " .. end_da)
+
+            -- called function body lines should have hits > 0
+            local called_body = lcov:match("DA:3,(%d+)")
+            assert.is_truthy(called_body)
+            assert.is_true(tonumber(called_body) > 0,
+               "called function body should have hits > 0")
+         end)
+
+         it("suppresses BRDA target hits when the branch instruction itself was never executed", function()
+            -- When a branch sits inside an unreached code path, its target
+            -- PCs may still show hits from other code paths that converge on
+            -- the same instruction address. The runner must check the branch
+            -- source instruction's hit count and emit "-" when it is zero.
+            local brda_sample = tmpdir .. sep .. "brda_ghost.lua"
+            write_file(brda_sample, [[
+local M = {}
+function M.run(x)
+   if x > 0 then
+      return "pos"
+   elseif x < -100 then
+      if x < -200 then
+         return "deep"
+      end
+      return "neg100"
+   end
+   return "other"
+end
+return M
+]])
+            local brda_test = tmpdir .. sep .. "brda_test.lua"
+            write_file(brda_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+local m = require("brda_ghost")
+m.run(1)
+m.run(0)
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "brda_stats.out"
+            local lcov_f = tmpdir .. sep .. "brda_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_brda"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "brda_ghost$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner brda_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner brda_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            -- The inner branch "if x < -200 then" (line 6) is inside the
+            -- elseif body which is never entered (x=-101..-200 never tested).
+            -- DA for line 6 must be 0.
+            local da6 = lcov:match("\nDA:6,(%d+)")
+            assert.is_truthy(da6, "DA for line 6 should exist")
+            assert.equal(0, tonumber(da6),
+               "inner branch line should have DA:0, got " .. da6)
+
+            -- All BRDA entries for line 6 must show "-" (not taken).
+            -- Collect all BRDA entries for line 6.
+            local ghost_hits = {}
+            for hit in lcov:gmatch("BRDA:6,%d+,%d+,([%d-]+)") do
+               ghost_hits[#ghost_hits + 1] = hit
+            end
+            assert.is_true(#ghost_hits >= 2,
+               "expected at least 2 BRDA targets for line 6")
+            for _, hit in ipairs(ghost_hits) do
+               assert.equal("-", hit,
+                  "BRDA target on unreached line 6 must be '-', got " .. hit)
+            end
+         end)
       end)
 
       describe("config loading", function()

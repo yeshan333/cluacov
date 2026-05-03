@@ -202,7 +202,7 @@ OK
 
 ### 5.2 End-to-end `busted` run produces lcov with branch coverage
 
-From `aone-ci-component/lua-busted/examples/`:
+From `ci-component/lua-busted/examples/`:
 
 ```text
 ==> [2/4] 运行 busted 单元测试
@@ -262,5 +262,4 @@ reproducible, but the use-after-free was always present.
 - `src/cluacov/pchook.c` — implementation of all of the above
 - `src/cluacov/runner.lua` — the `__gc` finalizer that originally
   exposed the bug (left unchanged; the fix is structural in C)
-- `examples/` in [aone-ci-component/lua-busted](https://code.alibaba-inc.com/aone-ci-component/lua-busted)
-  — end-to-end reproducer with `busted` and `lcov` reports
+

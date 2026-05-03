@@ -25,13 +25,17 @@ repo_root="$(cd "$script_dir/.." && pwd)"
 
 cd "$repo_root"
 
+# Detect the Lua version from the `lua` binary on PATH so the script
+# works for 5.4, 5.5 and any future version without hardcoding.
+lua_ver="$(lua -e 'io.write(string.match(_VERSION, "%d+%.%d+"))')"
+
 # Wire up local rocks tree so `require("cluacov.*")` finds the built
 # .so files. Idempotent: safe to run inside an already-set-up shell.
-eval "$(luarocks --lua-version=5.5 path)"
+eval "$(luarocks --lua-version="$lua_ver" path)"
 
 # Make local-tree .so files take priority (luarocks make --tree=. puts
-# them in ./lib/lua/5.5/cluacov/ which the eval above already covers,
-# but we also pick up the legacy ./cluacov/*.so layout if present).
+# them in ./lib/lua/$lua_ver/cluacov/ which the eval above already
+# covers, but we also pick up the legacy ./cluacov/*.so layout if present).
 export LUA_CPATH="./?.so;./cluacov/?.so;${LUA_CPATH:-};;"
 
 scripts=(

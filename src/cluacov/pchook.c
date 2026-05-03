@@ -135,6 +135,9 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
     lua_pushinteger(L, proto->linedefined);
     lua_setfield(L, -2, "linedefined");
 
+    lua_pushinteger(L, proto->lastlinedefined);
+    lua_setfield(L, -2, "lastlinedefined");
+
     lua_pushinteger(L, proto->sizecode);
     lua_setfield(L, -2, "sizecode");
 
@@ -469,6 +472,8 @@ static void aggregate_all_hits(lua_State *L, int result_idx) {
 
         lua_getfield(L, entry_idx, "linedefined");
         lua_setfield(L, rec_idx, "linedefined");
+        lua_getfield(L, entry_idx, "lastlinedefined");
+        lua_setfield(L, rec_idx, "lastlinedefined");
         lua_getfield(L, entry_idx, "sizecode");
         lua_setfield(L, rec_idx, "sizecode");
         lua_getfield(L, entry_idx, "hits");
@@ -496,6 +501,7 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx) {
         int file_idx;
         int lines_idx;
         int hits_idx;
+        int temp_idx;
         int max_line;
         int lines_len;
         int j;
@@ -548,9 +554,30 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx) {
             if (line > max_line) max_line = line;
         }
 
-        /* Walk entry.hits (0-based pc -> count). */
+        /* Walk entry.hits — two-pass approach:
+         *
+         * Pass 1: Build per-proto per-line MAX in a temporary table.
+         *   Multiple PCs within the same proto may map to the same line
+         *   (e.g. a loop test + body on one line); take the maximum to
+         *   represent "line execution count" for this single proto.
+         *
+         * Pass 2: SUM the per-proto maxima into the file accumulator.
+         *   When the same file is loaded multiple times (e.g. busted
+         *   clearing package.loaded between spec files), each load
+         *   creates separate Proto objects. Their line hits must be
+         *   summed to give the total execution count.
+         *
+         * The hits-table key is `savedpc - proto->code` (next-instruction
+         * PC). To get the correct source line we look up lines[pc - 1].
+         * Keys <= 0 are skipped (no "previous instruction" in this Proto).
+         */
         lua_getfield(L, entry_idx, "hits");
         hits_idx = lua_gettop(L);
+
+        /* Pass 1: per-proto per-line MAX into temp table */
+        lua_newtable(L);
+        temp_idx = lua_gettop(L);
+
         lua_pushnil(L);
         while (lua_next(L, hits_idx) != 0) {
             int pc = (int)lua_tointeger(L, -2);
@@ -558,29 +585,47 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx) {
             int line;
             lua_pop(L, 1);  /* value */
 
-            /* line = entry.lines[pc] */
-            lua_rawgeti(L, lines_idx, pc);
+            if (pc <= 0) continue;
+
+            /* line = entry.lines[pc - 1]  (the instruction that ran) */
+            lua_rawgeti(L, lines_idx, pc - 1);
             line = (int)lua_tointeger(L, -1);
             lua_pop(L, 1);
             if (line <= 0) continue;
 
-            lua_rawgeti(L, file_idx, line);
+            lua_rawgeti(L, temp_idx, line);
             {
                 lua_Integer existing = lua_tointeger(L, -1);
                 lua_pop(L, 1);
                 if (count > existing) {
                     lua_pushinteger(L, count);
-                    lua_rawseti(L, file_idx, line);
+                    lua_rawseti(L, temp_idx, line);
                 }
             }
             if (line > max_line) max_line = line;
         }
 
+        /* Pass 2: SUM per-proto maxima into file accumulator */
+        lua_pushnil(L);
+        while (lua_next(L, temp_idx) != 0) {
+            int line = (int)lua_tointeger(L, -2);
+            lua_Integer proto_max = lua_tointeger(L, -1);
+            lua_pop(L, 1);  /* value */
+
+            lua_rawgeti(L, file_idx, line);
+            {
+                lua_Integer existing = lua_tointeger(L, -1);
+                lua_pop(L, 1);
+                lua_pushinteger(L, existing + proto_max);
+                lua_rawseti(L, file_idx, line);
+            }
+        }
+
         lua_pushinteger(L, max_line);
         lua_setfield(L, file_idx, "max");
 
-        /* Pop hits, lines, file, source, entry. */
-        lua_pop(L, 5);
+        /* Pop temp, hits, lines, file, source, entry. */
+        lua_pop(L, 6);
     }
 
     lua_pop(L, 1);  /* PCHOOK_KEY */
@@ -797,6 +842,48 @@ static int l_get_line_hits(lua_State *L) {
     return 1;
 }
 
+/*
+ * get_func_defs(func) — returns a list of { linedefined, lastlinedefined }
+ * for every child Proto in the function's proto tree (skipping the top-level
+ * chunk whose linedefined == 0).  This traverses the raw Proto* hierarchy of
+ * the loaded function, so it works regardless of whether pchook was active.
+ * Used by runner.lua to discover lastlinedefined for uncalled functions.
+ */
+static void collect_func_defs_recursive(
+    lua_State *L, Proto *proto, int result_idx, int *count
+) {
+    int i;
+    if (proto->linedefined > 0) {
+        lua_createtable(L, 0, 2);
+        lua_pushinteger(L, proto->linedefined);
+        lua_setfield(L, -2, "linedefined");
+        lua_pushinteger(L, proto->lastlinedefined);
+        lua_setfield(L, -2, "lastlinedefined");
+        lua_rawseti(L, result_idx, ++(*count));
+    }
+    for (i = 0; i < proto->sizep; i++) {
+        collect_func_defs_recursive(L, proto->p[i], result_idx, count);
+    }
+}
+
+static int l_get_func_defs(lua_State *L) {
+    Proto *proto;
+    int result_idx;
+    int count = 0;
+
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    luaL_argcheck(L, !lua_iscfunction(L, 1), 1,
+        "Lua function expected, got C function");
+
+    proto = get_proto(L, 1);
+
+    lua_newtable(L);
+    result_idx = lua_gettop(L);
+
+    collect_func_defs_recursive(L, proto, result_idx, &count);
+    return 1;
+}
+
 #else /* Lua < 5.4 or LuaJIT */
 
 static int l_start(lua_State *L) {
@@ -835,6 +922,12 @@ static int l_get_all_line_hits(lua_State *L) {
     return 1;
 }
 
+static int l_get_func_defs(lua_State *L) {
+    (void)L;
+    lua_newtable(L);
+    return 1;
+}
+
 #endif
 
 int luaopen_cluacov_pchook(lua_State *L) {
@@ -860,6 +953,9 @@ int luaopen_cluacov_pchook(lua_State *L) {
 
     lua_pushcfunction(L, l_get_all_line_hits);
     lua_setfield(L, -2, "get_all_line_hits");
+
+    lua_pushcfunction(L, l_get_func_defs);
+    lua_setfield(L, -2, "get_func_defs");
 
     lua_pushliteral(L, "1.0.0");
     lua_setfield(L, -2, "version");

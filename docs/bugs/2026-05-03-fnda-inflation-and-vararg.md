@@ -1,7 +1,9 @@
-# Function coverage inflated by OP_CLOSURE, broken for vararg functions
+# Function coverage inflated by OP_CLOSURE, broken for vararg functions, and aggregate off-by-one
 
-- **Affected component**: `cluacov.runner` -- `write_lcov` in `src/cluacov/runner.lua`
-- **Affected versions**: all versions prior to commit `d511be7`
+- **Affected component**: `cluacov.runner` (`src/cluacov/runner.lua`),
+  `cluacov.pchook` (`src/cluacov/pchook.c`)
+- **Affected versions**: all versions prior to commit `d511be7` (defects 1-3),
+  all versions prior to the aggregate off-by-one fix (defect 4)
 - **Severity**: medium (silent data correctness, no crash)
 - **Discovered**: 2026-05-03
 - **Fix commit**: `d511be7`
@@ -40,6 +42,36 @@ Even with FNDA corrected, the line-coverage (DA) record for an
 uncalled function's definition line still shows hits > 0. The HTML
 report displays a blue (covered) definition line followed by an
 entirely red (uncovered) function body, which is visually misleading.
+
+### 4. `aggregate_all_line_hits` off-by-one: DA values attributed to wrong line
+
+The `get_all_line_hits()` C function (used by `runner.lua` to produce
+DA records in LCOV) maps hits to the **wrong source line** for any
+instruction whose successor is on a different line. Typically this
+causes:
+
+- Hits shifting from line N to line N+1 (or a nearby line)
+- Definition lines of uncalled functions appearing as covered (or 0)
+  depending on bytecode layout
+- In Lua 5.5, CLOSURE is at `end` and SETFIELD at `function`, so the
+  CLOSURE hit leaks to the SETFIELD line instead of the `end` line
+
+In the downstream project (`luatricks`), this produced anomalies like
+`DA:38,844390` on an uncalled function's closing `end` line, and
+`DA:123,834089` on a function definition line.
+
+### 5. Uncalled function `end` line shows hits in Lua 5.5
+
+After fixing defects 3 and 4, the `end` line (`lastlinedefined`) of
+uncalled multi-line functions still showed DA > 0 in Lua 5.5. In the
+HTML report this meant the closing `end` of an entirely-uncovered
+function body was highlighted blue (covered).
+
+In Lua 5.4 `OP_CLOSURE` is at `linedefined` (the `function` keyword
+line), which defect 3's fix already zeroed. In Lua 5.5 the compiler
+moved `OP_CLOSURE` to `lastlinedefined` (the `end` line), so that
+line accumulated a hit from the parent chunk's module loading pass.
+The defect-3 fix only suppressed `linedefined`, not `lastlinedefined`.
 
 ## Reproduction
 
@@ -147,6 +179,45 @@ functions this produces a covered definition line (blue in HTML)
 with an entirely uncovered body (red), creating a visual
 contradiction.
 
+### Defect 4: `aggregate_all_line_hits` savedpc off-by-one
+
+`collect_line_hits_recursive` (used by `get_line_hits`) correctly
+applies `get_pc_line(proto, pc - 1)` when mapping a hits-table key
+to a source line, because the key is a savedpc offset (next
+instruction's PC). However, `aggregate_all_line_hits` (used by
+`get_all_line_hits` and therefore by `runner.lua`'s DA output) looked
+up `entry.lines[pc]` directly — the line of instruction AT `pc`,
+not instruction `pc - 1` that actually executed.
+
+```c
+// BEFORE (wrong): attributes hits to the NEXT instruction's line
+lua_rawgeti(L, lines_idx, pc);
+
+// AFTER (correct): attributes hits to the EXECUTED instruction's line
+if (pc <= 0) continue;
+lua_rawgeti(L, lines_idx, pc - 1);
+```
+
+The bug was invisible in most cases because adjacent bytecode
+instructions tend to share the same source line. It only manifested
+when consecutive instructions mapped to **different** lines:
+
+- CLOSURE/SETFIELD pairs in module top-level chunks (Lua 5.5 puts
+  CLOSURE at `end` and SETFIELD at `function`)
+- The last instruction of a for-loop body followed by the TFORCALL
+  on the `for` line
+- Function-return sequences where CLOSE and RETURN are on different
+  lines
+
+### Defect 5: `lastlinedefined` not suppressed for uncalled functions
+
+The defect-3 fix only added `linedefined` (the `function` keyword
+line) to `uncalled_def_lines`. In Lua 5.5, `OP_CLOSURE` moved to
+`lastlinedefined`, so the parent chunk's module-load pass gives
+`DA:end_line,N` with N > 0. Runner.lua had no knowledge of
+`lastlinedefined` because pchook did not expose it, and the
+`uncalled_def_lines` set only contained `linedefined`.
+
 ## Fix
 
 ### FNDA: use per-Proto body hits with vararg fallback
@@ -185,6 +256,46 @@ end
 if uncalled_def_lines[line_nr] then hits = 0 end
 ```
 
+### DA: fix savedpc off-by-one in `aggregate_all_line_hits`
+
+In `pchook.c`, the `aggregate_all_line_hits` inner loop now mirrors
+the `pc - 1` shift already used by `collect_line_hits_recursive`:
+
+```c
+/* Walk entry.hits – key is savedpc offset (next instruction PC).
+ * Look up lines[pc - 1] to attribute the hit to the EXECUTED
+ * instruction's source line, not the next instruction's line.  */
+if (pc <= 0) continue;
+lua_rawgeti(L, lines_idx, pc - 1);
+```
+
+The `pc <= 0` guard skips any degenerate key that has no preceding
+instruction inside the Proto.
+
+### DA: suppress `lastlinedefined` for uncalled functions
+
+Three changes:
+
+1. `pchook.c:materialize_proto_entry` now also stores
+   `proto->lastlinedefined` in each materialized entry table.
+2. A new `pchook.get_func_defs(func)` C function traverses the full
+   Proto tree of a loaded file (including protos never entered by the
+   hook) and returns `{ linedefined, lastlinedefined }` for each.
+3. `runner.lua:write_lcov` calls `get_func_defs(func)` and adds
+   `lastlinedefined` to `uncalled_def_lines` for every text-matched
+   uncalled function whose `linedefined` matches a Proto.
+
+```lua
+for _, def in ipairs(pchook.get_func_defs(func)) do
+   if uncalled_ld_set[def.linedefined] then
+      local lld = def.lastlinedefined
+      if lld and lld > 0 and lld ~= def.linedefined then
+         uncalled_def_lines[lld] = true
+      end
+   end
+end
+```
+
 ## Why only Lua 5.4+ is affected by the vararg issue
 
 `OP_VARARGPREP` was introduced in Lua 5.4. Earlier versions (5.1,
@@ -200,9 +311,9 @@ definition line regardless of Lua version.
 
 After the fix:
 
-- **101 unit tests pass** (busted), including 4 new function-coverage
-  tests: FNDA:0 for uncalled, FNH correctness, multi-call counting,
-  and vararg function FNDA.
+- **107 unit tests pass** (busted), including 4 function-coverage
+  tests, 2 aggregate off-by-one regression tests, 3 `get_func_defs`
+  tests, and 1 uncalled-function `end`-line zeroing test.
 - **e2e_branch_coverage.lua** passes all assertions. `count_args(...)`
   now correctly reports `FNDA:2` (previously `FNDA:0`).
   `max_of_three` and `Point:length` correctly report `FNDA:0` and
@@ -210,6 +321,13 @@ After the fix:
 - **e2e_function_coverage.lua** (new) validates 6 functions (4 called
   including 1 vararg, 2 uncalled) through both in-memory proto hits
   and round-trip LCOV parsing.
+- **Downstream verification** (Lua 5.5, `luatricks`): `DA:38` now
+  correctly shows 1 (was 844390 before fix); previously missing DA
+  lines for loop CLOSE instructions now appear correctly.
+- **Lua 5.5 `end`-line verification**: uncalled function's `end` line
+  now correctly shows `DA:9,0` (was `DA:9,1` before fix). Both
+  `linedefined` and `lastlinedefined` are suppressed for uncalled
+  functions.
 
 ## Lessons
 
@@ -225,3 +343,16 @@ After the fix:
   chunk, not function entry. When the function was never called, the
   definition line hit should be suppressed to avoid misleading HTML
   reports.
+- When multiple C functions derive source-line information from the
+  same hits table, they **must** apply the same savedpc convention
+  (`pc - 1`). The off-by-one in `aggregate_all_line_hits` was latent
+  because adjacent instructions usually share a line; it only
+  surfaced with cross-line instruction pairs (CLOSURE/SETFIELD,
+  loop boundaries, return sequences). Any future API that reads the
+  hits table must include this shift.
+- Lua VM versions may change **which source line** an instruction is
+  attributed to (e.g. Lua 5.5 moved `OP_CLOSURE` from `linedefined`
+  to `lastlinedefined`). Coverage suppression logic must handle both
+  ends of a function's line range. The new `get_func_defs` API
+  exposes the full Proto tree including protos never seen by the hook,
+  making this cross-version suppression possible.

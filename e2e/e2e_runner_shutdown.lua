@@ -74,15 +74,16 @@ end
 -- put them at the FRONT of the child's package.path / package.cpath
 -- so they win the require race.
 local repo_root = e2e_dir:gsub("/e2e/$", "")
+local lua_ver = _VERSION:match("%d+%.%d+")   -- e.g. "5.4" or "5.5"
 local local_lua_path = table.concat({
    repo_root .. "/src/?.lua",
    repo_root .. "/src/?/init.lua",
    e2e_dir .. "?.lua",
 }, ";")
 local local_cpath = table.concat({
-   repo_root .. "/cluacov/?.so",            -- legacy layout
-   repo_root .. "/lib/lua/5.5/?.so",        -- luarocks --tree=. layout
-   repo_root .. "/lib/lua/5.5/?/init.so",
+   repo_root .. "/cluacov/?.so",                          -- legacy layout
+   repo_root .. "/lib/lua/" .. lua_ver .. "/?.so",        -- luarocks --tree=. layout
+   repo_root .. "/lib/lua/" .. lua_ver .. "/?/init.so",
 }, ";")
 
 -- No .luacov config needed: target_sample.lua lives at a path that

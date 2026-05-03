@@ -259,9 +259,14 @@ local function write_lcov(config, all_line_hits, all_hits)
       local brf, brh = 0, 0
       for _, b in ipairs(branches) do
          local proto_hits = hits_by_ld[b.linedefined .. ":" .. b.sizecode] or {}
+         -- b.pc is the branch source instruction (savedpc convention).
+         -- If the branch instruction itself was never executed, all
+         -- target hit counts are noise from other code paths converging
+         -- on the same target PCs — suppress them.
+         local branch_hit = (proto_hits[b.pc] or 0) > 0
          brf = brf + #b.targets
          for ti, t in ipairs(b.targets) do
-            local taken = proto_hits[t.pc] or 0
+            local taken = branch_hit and (proto_hits[t.pc] or 0) or 0
             fd:write(string.format("BRDA:%d,%d,%d,%s\n",
                b.line, block_id, ti - 1,
                taken > 0 and tostring(taken) or "-"))
@@ -275,10 +280,24 @@ local function write_lcov(config, all_line_hits, all_hits)
       -- Collect definition lines of uncalled functions. The hit on these
       -- lines comes from OP_CLOSURE in the parent chunk, not from the
       -- function being entered, so it should not count as line coverage.
+      -- In Lua 5.4 CLOSURE is at linedefined; in Lua 5.5 it moves to
+      -- lastlinedefined (the `end` line), so both must be suppressed.
+      -- get_func_defs traverses the full Proto tree of the loaded file,
+      -- including protos that were never entered by the hook.
       local uncalled_def_lines = {}
+      local uncalled_ld_set = {}
       for _, fn in ipairs(func_defs) do
          if not fn_call_counts[fn.line] then
             uncalled_def_lines[fn.line] = true
+            uncalled_ld_set[fn.line] = true
+         end
+      end
+      for _, def in ipairs(pchook.get_func_defs(func)) do
+         if uncalled_ld_set[def.linedefined] then
+            local lld = def.lastlinedefined
+            if lld and lld > 0 and lld ~= def.linedefined then
+               uncalled_def_lines[lld] = true
+            end
          end
       end
 

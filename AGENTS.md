@@ -13,7 +13,7 @@ Unit tests are in `spec/*_spec.lua`. End-to-end coverage scenarios are in `e2e/`
 - `luarocks install busted busted-htest`: installs the test runner and CI formatter.
 - `busted -o htest`: runs the unit test suite in the same format used by CI.
 - `busted spec/pchook_spec.lua`: runs one focused spec file.
-- `luarocks --lua-version=5.5 make cluacov-dev-1.rockspec --tree=.` then `./e2e/run_all.sh`: builds into the repo-local tree and runs all e2e scenarios.
+- `luarocks make cluacov-dev-1.rockspec --tree=.` then `./e2e/run_all.sh`: builds into the repo-local tree and runs all e2e scenarios. The scripts auto-detect the current Lua version; no `--lua-version` flag is needed.
 
 Agents should follow the local instruction in `@/Users/yeshan333/.codex/RTK.md`: prefix shell commands with `rtk`, for example `rtk busted -o htest`.
 
