@@ -252,7 +252,19 @@ local function write_lcov(config, all_line_hits, all_hits)
 
       local hits_by_ld = {}
       for _, entry in ipairs(proto_list) do
-         hits_by_ld[entry.linedefined .. ":" .. entry.sizecode] = entry.hits
+         local key = entry.linedefined .. ":" .. entry.sizecode
+         local existing = hits_by_ld[key]
+         if existing then
+            for pc, count in pairs(entry.hits) do
+               existing[pc] = (existing[pc] or 0) + count
+            end
+         else
+            local copy = {}
+            for pc, count in pairs(entry.hits) do
+               copy[pc] = count
+            end
+            hits_by_ld[key] = copy
+         end
       end
 
       local block_id = 0

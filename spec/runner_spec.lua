@@ -586,6 +586,86 @@ return {
                   "BRDA target on unreached line 6 must be '-', got " .. hit)
             end
          end)
+
+         it("aggregates BRDA counts across multiple proto entries for the same file", function()
+            -- When the same source is loaded multiple times (e.g. busted clears
+            -- package.loaded), there are multiple proto entries per function.
+            -- BRDA counts must be summed, not silently overwritten by the last entry.
+            local brda_multi_src = tmpdir .. sep .. "brda_multi.lua"
+            write_file(brda_multi_src, [[
+local M = {}
+function M.check(x)
+   if x > 0 then
+      return "pos"
+   end
+   return "other"
+end
+return M
+]])
+            local brda_multi_test = tmpdir .. sep .. "brda_multi_test.lua"
+            write_file(brda_multi_test, string.format([[
+package.path = %q .. "/?.lua;" .. package.path
+-- Load 1: call with positive
+local m1 = require("brda_multi")
+m1.check(1)
+-- Reload
+package.loaded["brda_multi"] = nil
+local m2 = require("brda_multi")
+m2.check(5)
+-- Reload once more
+package.loaded["brda_multi"] = nil
+local m3 = require("brda_multi")
+m3.check(10)
+]], tmpdir))
+
+            local stats_f = tmpdir .. sep .. "brda_multi_stats.out"
+            local lcov_f = tmpdir .. sep .. "brda_multi_lcov.info"
+            local cfg_f = tmpdir .. sep .. ".luacov_brda_multi"
+            write_file(cfg_f, string.format([[
+return {
+   statsfile = %q,
+   lcovfile = %q,
+   include = { "brda_multi$" },
+}
+]], stats_f, lcov_f))
+
+            local cmd
+            if is_windows then
+               cmd = string.format(
+                  'set "LUACOV_CONFIG=%s" && cd /d "%s" && lua -lcluacov.runner brda_multi_test.lua 2>&1',
+                  cfg_f, tmpdir)
+            else
+               cmd = string.format(
+                  "cd %s && LUACOV_CONFIG=%s lua -lcluacov.runner brda_multi_test.lua 2>&1",
+                  tmpdir, cfg_f)
+            end
+            os.execute(cmd)
+
+            local lfh = io.open(lcov_f, "r")
+            assert.is_truthy(lfh, "lcov file should exist")
+            local lcov = lfh:read("*a")
+            lfh:close()
+
+            -- The branch at line 3 ("if x > 0 then") is always taken (true).
+            -- Across 3 loads each calling check(positive), the true-branch
+            -- hit count must be the aggregate (>=3), not just from one load (1).
+            local brda_hits = {}
+            for hit in lcov:gmatch("BRDA:3,%d+,%d+,([%d-]+)") do
+               brda_hits[#brda_hits + 1] = hit
+            end
+            assert.is_true(#brda_hits >= 2,
+               "expected at least 2 BRDA targets for line 3")
+
+            -- At least one direction must show aggregated count >= 3
+            local max_hit = 0
+            for _, h in ipairs(brda_hits) do
+               if h ~= "-" then
+                  max_hit = math.max(max_hit, tonumber(h))
+               end
+            end
+            assert.is_true(max_hit >= 3,
+               "BRDA true-branch must aggregate across loads (>=3), got " .. max_hit)
+         end)
       end)
 
       describe("config loading", function()
