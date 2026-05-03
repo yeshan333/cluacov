@@ -261,12 +261,17 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
         }
 
         if (opcode == OP_TFORLOOP) {
+            /* TFORCALL at pc-1 falls through to TFORLOOP via
+               `goto l_tforloop`, bypassing vmfetch.  The count hook
+               therefore never fires at TFORLOOP's PC.  Use TFORCALL's
+               PC (pc-1) as the branch source so that pchook's recorded
+               hit data is found during BRDA generation. */
             add_branch_site(
                 L,
                 proto,
                 result_index,
                 count,
-                pc,
+                pc - 1,
                 "iterator",
                 pc + 1,
                 pc + 1 - GETARG_Bx(instruction)
@@ -306,12 +311,14 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
                 );
             }
 #else
+            /* Lua 5.2/5.3: same issue — TFORCALL at pc-1 does
+               `goto l_tforloop`, bypassing vmfetch for TFORLOOP. */
             add_branch_site(
                 L,
                 proto,
                 result_index,
                 count,
-                pc,
+                pc - 1,
                 "iterator",
                 pc + 1,
                 pc + 1 + GETARG_sBx(instruction)
