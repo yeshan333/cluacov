@@ -166,6 +166,15 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
  *
  * Returns 0 on success, non-zero if PCHOOK_KEY/PROTO_INDEX_KEY are missing
  * (in which case nothing extra is pushed).
+ *
+ * Stale-mapping guard:
+ *   PROTO_INDEX_KEY keys are Proto* lightuserdata.  After GC, Lua may
+ *   reuse a freed Proto's address for a brand-new Proto.  Without
+ *   validation, the old mapping would silently route the new Proto's
+ *   hits into the old entry — wrong source, wrong line table, wrong
+ *   hit counts.  We detect this by comparing the stored entry's
+ *   (linedefined, sizecode) with the live Proto: a mismatch means the
+ *   address was recycled and we must create a fresh entry.
  */
 static int push_hits_for_proto(lua_State *L, const Proto *proto) {
     lua_Integer entry_id;
@@ -184,15 +193,37 @@ static int push_hits_for_proto(lua_State *L, const Proto *proto) {
     entry_id = lua_tointeger(L, -1);
     lua_pop(L, 1);
 
-    if (entry_id == 0) {
-        /* First time we see this Proto: append a fresh entry. */
-        entry_id = (lua_Integer)lua_rawlen(L, pchook_idx) + 1;
-        materialize_proto_entry(L, proto);            /* push entry table */
-        lua_rawseti(L, pchook_idx, entry_id);          /* PCHOOK[entry_id] = entry */
+    if (entry_id != 0) {
+        /* Validate: detect stale mapping due to Proto address reuse. */
+        int entry_idx;
+        lua_rawgeti(L, pchook_idx, entry_id);
+        entry_idx = lua_gettop(L);
 
-        lua_pushinteger(L, entry_id);
-        lua_rawsetp(L, index_idx, (const void *)proto); /* INDEX[Proto*] = entry_id */
+        lua_getfield(L, entry_idx, "linedefined");
+        lua_getfield(L, entry_idx, "sizecode");
+        if (lua_tointeger(L, -2) != (lua_Integer)proto->linedefined ||
+            lua_tointeger(L, -1) != (lua_Integer)proto->sizecode) {
+            /* Stale: drop old entry and fall through to create a new one. */
+            lua_pop(L, 3);  /* sizecode, linedefined, entry */
+            entry_id = 0;
+        } else {
+            /* Valid mapping: grab hits from the already-fetched entry. */
+            lua_pop(L, 2);  /* sizecode, linedefined */
+            lua_getfield(L, entry_idx, "hits");
+            lua_remove(L, entry_idx);   /* drop entry, keep hits */
+            lua_remove(L, index_idx);
+            lua_remove(L, pchook_idx);
+            return 0;
+        }
     }
+
+    /* First time we see this Proto (or stale mapping): append a fresh entry. */
+    entry_id = (lua_Integer)lua_rawlen(L, pchook_idx) + 1;
+    materialize_proto_entry(L, proto);            /* push entry table */
+    lua_rawseti(L, pchook_idx, entry_id);          /* PCHOOK[entry_id] = entry */
+
+    lua_pushinteger(L, entry_id);
+    lua_rawsetp(L, index_idx, (const void *)proto); /* INDEX[Proto*] = entry_id */
 
     /* Fetch entry, then its hits subtable. */
     lua_rawgeti(L, pchook_idx, entry_id);              /* push entry */

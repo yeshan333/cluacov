@@ -793,6 +793,94 @@ describe("pchook", function()
             assert.equal(5, data[3])
             os.remove(tmp)
          end)
+
+         it("handles Proto address reuse after GC without stale mapping", function()
+            -- After GC, Lua may reuse a freed Proto's address for a new Proto.
+            -- If push_hits_for_proto does not validate the mapping, the new
+            -- Proto's hits are silently attributed to the old (different) entry,
+            -- causing called functions to appear uncalled (DA:0).
+            local tmp = os.tmpname() .. ".lua"
+            local fh = assert(io.open(tmp, "w"))
+            -- File with two functions: size (has a for loop) and other.
+            fh:write(table.concat({
+               "local M = {}",
+               "function M.size(T)",
+               "   local i = 0",
+               "   for _, _ in pairs(T) do",
+               "      i = i + 1",
+               "   end",
+               "   return i",
+               "end",
+               "function M.other()",
+               "   return 42",
+               "end",
+               "return M",
+            }, "\n") .. "\n")
+            fh:close()
+
+            pchook.start()
+
+            -- Load 1: call size only
+            local m1 = assert(loadfile(tmp))()
+            m1.size({a = 1, b = 2})
+
+            -- Drop references and force GC to free load 1 protos.
+            m1 = nil  -- luacheck: ignore
+            collectgarbage("collect")
+            collectgarbage("collect")
+
+            -- Load 2: call other only (new protos may reuse freed addresses)
+            local m2 = assert(loadfile(tmp))()
+            m2.other()
+
+            -- Drop and GC again
+            m2 = nil  -- luacheck: ignore
+            collectgarbage("collect")
+            collectgarbage("collect")
+
+            -- Load 3: call both
+            local m3 = assert(loadfile(tmp))()
+            m3.size({x = 1})
+            m3.other()
+
+            pchook.stop()
+            local data = pchook.get_all_line_hits()["@" .. tmp]
+            assert.is_table(data)
+
+            -- Line 3 "local i = 0" must be > 0 (size was called in loads 1 & 3)
+            assert.is_true((data[3] or 0) > 0,
+               "first line of size() must be hit (line 3)")
+            -- Line 6 "end" of for loop must be > 0
+            assert.is_true((data[6] or 0) > 0,
+               "for-loop end must be hit (line 6)")
+            -- Line 7 "return i" must be > 0
+            assert.is_true((data[7] or 0) > 0,
+               "return in size() must be hit (line 7)")
+            -- Line 10 "return 42" must be > 0 (other called in loads 2 & 3)
+            assert.is_true((data[10] or 0) > 0,
+               "body of other() must be hit (line 10)")
+
+            -- Also verify via get_all_hits that fn_call_counts would be correct
+            local all_hits = pchook.get_all_hits()["@" .. tmp]
+            assert.is_table(all_hits)
+            local fn_counts = {}
+            for _, entry in ipairs(all_hits) do
+               local ld = entry.linedefined
+               if ld > 0 then
+                  local c = entry.hits[1] or entry.hits[2] or 0
+                  if c > 0 then
+                     fn_counts[ld] = (fn_counts[ld] or 0) + c
+                  end
+               end
+            end
+            -- size at ld=2, other at ld=9 — both must be detected as called
+            assert.is_true((fn_counts[2] or 0) > 0,
+               "size() must be detected as called via fn_call_counts")
+            assert.is_true((fn_counts[9] or 0) > 0,
+               "other() must be detected as called via fn_call_counts")
+
+            os.remove(tmp)
+         end)
       end)
 
       describe("get_func_defs", function()
