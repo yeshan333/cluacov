@@ -1,2 +1,48 @@
 [tools]
-lua = "5.4.8"
+lua = ["5.4.8", "5.5.0"]
+
+# ── build ──────────────────────────────────────────────────────
+[tasks."build:54"]
+description = "Build C extensions for Lua 5.4"
+run = "luarocks make cluacov-dev-1.rockspec"
+
+[tasks."build:55"]
+description = "Build C extensions for Lua 5.5"
+run = "MISE_LUA_VERSION=5.5.0 mise exec -- luarocks make cluacov-dev-1.rockspec"
+
+# ── unit tests ─────────────────────────────────────────────────
+[tasks."test:54"]
+description = "Build + unit tests on Lua 5.4"
+run = """
+luarocks make cluacov-dev-1.rockspec
+busted
+"""
+
+[tasks."test:55"]
+description = "Build + unit tests on Lua 5.5"
+run = "MISE_LUA_VERSION=5.5.0 mise exec -- bash -c 'luarocks make cluacov-dev-1.rockspec && busted'"
+
+[tasks."test:all"]
+description = "Build + unit tests on both Lua 5.4 and 5.5"
+depends = ["test:54", "test:55"]
+
+# ── e2e tests ──────────────────────────────────────────────────
+[tasks."e2e:54"]
+description = "Build local tree + E2E tests on Lua 5.4"
+run = """
+luarocks make cluacov-dev-1.rockspec --tree=.
+./e2e/run_all.sh
+"""
+
+[tasks."e2e:55"]
+description = "Build local tree + E2E tests on Lua 5.5"
+run = "MISE_LUA_VERSION=5.5.0 mise exec -- bash -c 'luarocks make cluacov-dev-1.rockspec --tree=. && ./e2e/run_all.sh'"
+
+[tasks."e2e:all"]
+description = "E2E tests on both Lua 5.4 and 5.5"
+depends = ["e2e:54", "e2e:55"]
+
+# ── full check (unit + e2e, both versions) ─────────────────────
+[tasks.check]
+description = "Full build + unit + E2E on both Lua 5.4 and 5.5"
+depends = ["test:all", "e2e:all"]

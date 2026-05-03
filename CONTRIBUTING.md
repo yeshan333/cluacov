@@ -5,11 +5,10 @@
 - [mise](https://mise.jdx.dev/) -- manages the Lua toolchain
 - A C compiler (gcc / clang)
 
-Install the default Lua version and a second version for dual-version testing:
+Install both Lua versions (declared in `mise.toml`):
 
 ```sh
-mise install              # installs Lua 5.4.8 (from mise.toml)
-mise install lua@5.5.0    # install Lua 5.5 as secondary
+mise install    # installs Lua 5.4.8 + 5.5.0
 ```
 
 ## Build
@@ -21,40 +20,38 @@ luarocks install busted busted-htest   # test runner + CI formatter
 
 ## Running Tests
 
-### Single-version (default Lua 5.4)
+### mise tasks (recommended)
+
+`mise.toml` defines tasks for dual-version build, test, and E2E:
 
 ```sh
-busted                    # all unit tests
+mise run test:54    # build + unit tests on Lua 5.4
+mise run test:55    # build + unit tests on Lua 5.5
+mise run test:all   # both versions
+
+mise run e2e:54     # build local tree + E2E on Lua 5.4
+mise run e2e:55     # build local tree + E2E on Lua 5.5
+mise run e2e:all    # both versions
+
+mise run check      # full: unit + E2E on both versions
+```
+
+### Manual commands
+
+If you prefer running commands directly:
+
+```sh
+# Lua 5.4 (default)
+busted                        # unit tests
 busted spec/pchook_spec.lua   # single spec file
-```
 
-### Dual-version testing
-
-CI tests Lua 5.1 through 5.5 and LuaJIT. Before pushing, verify at
-least the two PC-hook-capable versions (5.4 and 5.5) locally:
-
-**Lua 5.4 (default)**
-
-```sh
-luarocks make cluacov-dev-1.rockspec
-busted
-```
-
-**Lua 5.5**
-
-```sh
-MISE_LUA_VERSION=5.5.0 mise exec -- luarocks make cluacov-dev-1.rockspec
+# Lua 5.5
 MISE_LUA_VERSION=5.5.0 mise exec -- busted
 ```
 
-`MISE_LUA_VERSION` temporarily overrides the Lua binary, luarocks tree,
-and PATH so that the child `lua` processes spawned by runner_spec also
-use the correct version.
-
 ### End-to-end tests
 
-E2E scripts auto-detect the current Lua version; no `--lua-version`
-flag is needed:
+E2E scripts auto-detect the current Lua version:
 
 ```sh
 # Lua 5.4
@@ -68,9 +65,8 @@ MISE_LUA_VERSION=5.5.0 mise exec -- ./e2e/run_all.sh
 
 ### Quick checklist before pushing
 
-1. `busted` -- 109+ tests pass on Lua 5.4
-2. `MISE_LUA_VERSION=5.5.0 mise exec -- busted` -- same tests pass on 5.5
-3. `./e2e/run_all.sh` -- 7/7 E2E scenarios pass on at least one version
+1. `mise run test:all` -- 109+ tests pass on both 5.4 and 5.5
+2. `mise run e2e:54` or `mise run e2e:55` -- 7/7 E2E scenarios pass
 
 ## Coding Style
 

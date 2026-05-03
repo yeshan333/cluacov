@@ -8,12 +8,14 @@ Unit tests are in `spec/*_spec.lua`. End-to-end coverage scenarios are in `e2e/`
 
 ## Build, Test, and Development Commands
 
-- `mise install`: installs the configured Lua toolchain from `mise.toml`.
+- `mise install`: installs Lua 5.4.8 and 5.5.0 from `mise.toml`.
 - `luarocks make`: builds the local rock and native C modules.
 - `luarocks install busted busted-htest`: installs the test runner and CI formatter.
 - `busted -o htest`: runs the unit test suite in the same format used by CI.
 - `busted spec/pchook_spec.lua`: runs one focused spec file.
-- `luarocks make cluacov-dev-1.rockspec --tree=.` then `./e2e/run_all.sh`: builds into the repo-local tree and runs all e2e scenarios. The scripts auto-detect the current Lua version; no `--lua-version` flag is needed.
+- `mise run test:all`: builds and runs unit tests on both Lua 5.4 and 5.5.
+- `mise run e2e:54` / `mise run e2e:55`: builds into the repo-local tree and runs all e2e scenarios. The scripts auto-detect the current Lua version.
+- `mise run check`: full build + unit + E2E on both versions.
 
 Agents should follow the local instruction in `@/Users/yeshan333/.codex/RTK.md`: prefix shell commands with `rtk`, for example `rtk busted -o htest`.
 
