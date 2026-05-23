@@ -70,6 +70,11 @@ if [ ! -e "$ASAN_LIB" ]; then
   exit 1
 fi
 
+# Positive control: prove LSan is functional in this environment BEFORE
+# we declare a clean cluacov run "no leaks". A clean run with broken
+# LSan would be a silent false negative.
+./spec/asan_lsan_canary.sh
+
 export CFLAGS="-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-common"
 export LDFLAGS="-fsanitize=address,undefined"
 luarocks make cluacov-dev-1.rockspec --tree=.
@@ -103,6 +108,9 @@ if [ ! -e "$ASAN_LIB" ]; then
   echo "asan: cannot locate libasan.so (got $ASAN_LIB). Install gcc with ASan support." >&2
   exit 1
 fi
+
+# Positive control: prove LSan is functional before claiming "no leaks".
+./spec/asan_lsan_canary.sh
 
 # Install busted into the local --tree=. against the 5.5 interpreter.
 # A globally-installed busted under a different Lua version embeds a
