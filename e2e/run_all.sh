@@ -31,7 +31,10 @@ lua_ver="$(lua -e 'io.write(string.match(_VERSION, "%d+%.%d+"))')"
 
 # Wire up local rocks tree so `require("cluacov.*")` finds the built
 # .so files. Idempotent: safe to run inside an already-set-up shell.
-eval "$(luarocks --lua-version="$lua_ver" path)"
+# `--tree=.` prepends ./share/lua/<ver> and ./lib/lua/<ver> so that
+# `luarocks make --tree=.` artifacts win over any older globally
+# installed cluacov rock.
+eval "$(luarocks --lua-version="$lua_ver" --tree=. path)"
 
 # Make local-tree .so files take priority (luarocks make --tree=. puts
 # them in ./lib/lua/$lua_ver/cluacov/ which the eval above already

@@ -1,0 +1,11 @@
+# LeakSanitizer suppressions for the cluacov ASan run.
+#
+# Frames from third-party binaries that get spawned as subprocesses of
+# busted / e2e runners (shell, gcc, coreutils). LD_PRELOAD propagates
+# into these children, but the leaks are inside the host toolchain — not
+# in cluacov's own code — so they would only add noise.
+leak:x86_64-linux-gnu-gcc-11
+leak:gcc-11
+leak:/usr/bin/bash
+leak:/usr/bin/sort
+leak:make_if_command

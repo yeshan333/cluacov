@@ -6,3 +6,6 @@ e2e/output/
 /bin/
 /lib/
 /share/
+
+# ASan-instrumented luarocks tree built by `mise run asan:54`
+/.asan-tree/
