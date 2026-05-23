@@ -29,17 +29,16 @@ cd "$repo_root"
 # works for 5.4, 5.5 and any future version without hardcoding.
 lua_ver="$(lua -e 'io.write(string.match(_VERSION, "%d+%.%d+"))')"
 
-# Wire up local rocks tree so `require("cluacov.*")` finds the built
-# .so files. Idempotent: safe to run inside an already-set-up shell.
-# `--tree=.` prepends ./share/lua/<ver> and ./lib/lua/<ver> so that
-# `luarocks make --tree=.` artifacts win over any older globally
-# installed cluacov rock.
-eval "$(luarocks --lua-version="$lua_ver" --tree=. path)"
+# Wire up the global luarocks tree first, so users with cluacov / luacov
+# installed in their user/system tree (the common case) keep working.
+eval "$(luarocks --lua-version="$lua_ver" path)"
 
-# Make local-tree .so files take priority (luarocks make --tree=. puts
-# them in ./lib/lua/$lua_ver/cluacov/ which the eval above already
-# covers, but we also pick up the legacy ./cluacov/*.so layout if present).
-export LUA_CPATH="./?.so;./cluacov/?.so;${LUA_CPATH:-};;"
+# Then prepend the local --tree=. layout AND the legacy flat layout so
+# that local builds win over global installs. This is what makes
+# `luarocks make --tree=.` artifacts findable without restricting
+# LUA_PATH/CPATH to the local tree only (which would lose luacov).
+export LUA_PATH="$repo_root/share/lua/${lua_ver}/?.lua;$repo_root/share/lua/${lua_ver}/?/init.lua;${LUA_PATH:-};;"
+export LUA_CPATH="$repo_root/lib/lua/${lua_ver}/?.so;./?.so;./cluacov/?.so;${LUA_CPATH:-};;"
 
 scripts=(
    "e2e_branch_coverage.lua"

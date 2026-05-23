@@ -9,3 +9,7 @@ leak:gcc-11
 leak:/usr/bin/bash
 leak:/usr/bin/sort
 leak:make_if_command
+# genhtml is perl; e2e_runner_shutdown / e2e_multi_source / e2e_tick_mode
+# spawn it via io.popen. Perl's interpreter has at-exit allocations that
+# LSan reports under LD_PRELOAD inheritance.
+leak:perl

@@ -58,6 +58,10 @@ depends = ["test:all", "e2e:all"]
 # out leaks coming from third-party binaries (gcc, bash, sort, etc.) that
 # get spawned as subprocesses of busted / e2e runners and inherit the
 # preload. It does NOT suppress anything inside cluacov.
+#
+# CI mirror: .github/workflows/asan.yml runs equivalent logic on Lua 5.5.
+# If you change the sanitizer flags, ASAN_OPTIONS, suppressions, or the
+# canary invocation here, update that workflow too.
 [tasks."asan:54"]
 description = "Build cluacov + busted + e2e under ASan/UBSan on Lua 5.4"
 run = """
@@ -75,6 +79,12 @@ fi
 # LSan would be a silent false negative.
 ./spec/asan_lsan_canary.sh
 
+# Install busted into the local --tree=. against THIS interpreter, for
+# the same reason asan:55 does it: avoid an ABI-mismatch SEGV from a
+# globally-installed busted whose shebang resolves to a different Lua
+# version than the .so files we are about to build.
+luarocks install --tree=. busted
+
 export CFLAGS="-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-common"
 export LDFLAGS="-fsanitize=address,undefined"
 luarocks make cluacov-dev-1.rockspec --tree=.
@@ -85,12 +95,19 @@ unset CFLAGS LDFLAGS
 # spawns via io.popen / os.execute (e.g. runner_spec config-loading tests).
 eval "$(luarocks --lua-version=5.4 --tree=. path)"
 
-export ASAN_OPTIONS="abort_on_error=0:halt_on_error=0:detect_leaks=1:print_stacktrace=1"
+# halt_on_error=1 (default) is REQUIRED: with halt_on_error=0, ASan/LSan
+# print error reports but the process still exits 0 — the suite would
+# go green even with real leaks. abort_on_error=0 keeps orderly exits
+# (vs SIGABRT) so busted/genhtml can still drain output cleanly.
+export ASAN_OPTIONS="abort_on_error=0:detect_leaks=1:print_stacktrace=1"
+export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
 export LSAN_OPTIONS="suppressions=$PWD/spec/asan_lsan_suppressions.txt:print_suppressions=1"
 export LD_PRELOAD="$ASAN_LIB"
 
+# Use the locally-installed busted so its shebang points at THIS run\\047s
+# 5.4 interpreter, matching the .so we just built.
 echo "==> busted (ASan)"
-busted
+./bin/busted
 
 echo "==> e2e (ASan)"
 ./e2e/run_all.sh
@@ -127,7 +144,9 @@ unset CFLAGS LDFLAGS
 
 eval "$(luarocks --lua-version=5.5 --tree=. path)"
 
-export ASAN_OPTIONS="abort_on_error=0:halt_on_error=0:detect_leaks=1:print_stacktrace=1"
+# halt_on_error=1 (default) is REQUIRED: see asan:54 for rationale.
+export ASAN_OPTIONS="abort_on_error=0:detect_leaks=1:print_stacktrace=1"
+export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
 export LSAN_OPTIONS="suppressions=$PWD/spec/asan_lsan_suppressions.txt:print_suppressions=1"
 export LD_PRELOAD="$ASAN_LIB"
 
