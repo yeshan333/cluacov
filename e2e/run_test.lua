@@ -113,6 +113,13 @@ assert(n == 42 and err == nil)
 -- goto/continue idiom
 assert(sample.sum_odd({1, 2, 3, 4, 5}) == 9)  -- 1+3+5
 
+-- goto/continue: skip negatives (both branches taken → "covered")
+assert(sample.goto_filter({-1, 2, -3, 4, 5}) == 11)
+
+-- goto multiple labels: only exercise the "not found" path (all-negative)
+-- DO NOT pass positive values → leaves the "goto found" branch target red
+assert(sample.goto_first_match({-1, -2, -3}) == -1)
+
 -- vararg + select
 assert(sample.count_args(1, nil, "x", nil, true) == 3)
 assert(sample.count_args() == 0)

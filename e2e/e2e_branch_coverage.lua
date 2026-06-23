@@ -317,4 +317,83 @@ assert_eq("regression: M.if_block_first_line if-block first line `local cleaned 
 assert_eq("regression: M.first_line_local body first line >= conditional return line",
    line_hit_count(106) >= line_hit_count(108), true)
 
+-- ---------------------------------------------------------------------------
+-- goto scenario assertions
+--
+-- goto_filter (M.goto_filter): `if v < 0 then goto skip end`
+--   Input {-1, 2, -3, 4, 5} exercises BOTH branches → "covered".
+--   L394 is the `if v < 0` conditional.
+--
+-- goto_first_match (M.goto_first_match): `if v > 0 then ... goto found end`
+--   Input {-1, -2, -3}: no positive found → loop exits, "goto done" path taken.
+--   The "goto found" branch target is never reached → "partial".
+--   L410 is the `if v > 0` conditional.
+--
+-- goto_early_return (M.goto_early_return): `if err then goto bail end`
+--   Never called from run_test.lua → fully "uncovered".
+--   L425 is the `if err then` conditional.
+-- ---------------------------------------------------------------------------
+
+local goto_filter_branch = nil
+local goto_first_match_branch = nil
+local goto_early_return_branch = nil
+for _, b in ipairs(result.branches) do
+   if b.line == 394 and b.kind == "test" then
+      goto_filter_branch = b
+   end
+   if b.line == 410 and b.kind == "test" then
+      goto_first_match_branch = b
+   end
+   if b.line == 425 and b.kind == "test" then
+      goto_early_return_branch = b
+   end
+end
+
+assert_eq("goto_filter: test branch found at L394",
+   goto_filter_branch ~= nil, true)
+assert_eq("goto_filter: branch status is covered",
+   goto_filter_branch and goto_filter_branch.status, "covered")
+assert_eq("goto_filter: has 2 targets",
+   goto_filter_branch and #goto_filter_branch.targets, 2)
+local gf_hits = {}
+if goto_filter_branch then
+   for _, t in ipairs(goto_filter_branch.targets) do
+      gf_hits[#gf_hits + 1] = t.hits
+   end
+end
+assert_eq("goto_filter: all targets hit",
+   (gf_hits[1] or 0) > 0 and (gf_hits[2] or 0) > 0, true)
+
+assert_eq("goto_first_match: test branch found at L410",
+   goto_first_match_branch ~= nil, true)
+assert_eq("goto_first_match: branch status is partial",
+   goto_first_match_branch and goto_first_match_branch.status, "partial")
+assert_eq("goto_first_match: has 2 targets",
+   goto_first_match_branch and #goto_first_match_branch.targets, 2)
+local gfm_hits = {}
+if goto_first_match_branch then
+   for _, t in ipairs(goto_first_match_branch.targets) do
+      gfm_hits[#gfm_hits + 1] = t.hits
+   end
+end
+local gfm_any_hit = (gfm_hits[1] or 0) + (gfm_hits[2] or 0) > 0
+local gfm_any_miss = (gfm_hits[1] or 0) == 0 or (gfm_hits[2] or 0) == 0
+assert_eq("goto_first_match: at least one target hit", gfm_any_hit, true)
+assert_eq("goto_first_match: at least one target not hit (partial)", gfm_any_miss, true)
+
+assert_eq("goto_early_return: test branch found at L425",
+   goto_early_return_branch ~= nil, true)
+assert_eq("goto_early_return: branch status is uncovered",
+   goto_early_return_branch and goto_early_return_branch.status, "uncovered")
+assert_eq("goto_early_return: has 2 targets",
+   goto_early_return_branch and #goto_early_return_branch.targets, 2)
+local ger_hits = {}
+if goto_early_return_branch then
+   for _, t in ipairs(goto_early_return_branch.targets) do
+      ger_hits[#ger_hits + 1] = t.hits
+   end
+end
+assert_eq("goto_early_return: all targets zero hit",
+   (ger_hits[1] or 0) == 0 and (ger_hits[2] or 0) == 0, true)
+
 print("\n=== E2E test PASSED ===")

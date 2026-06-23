@@ -384,4 +384,51 @@ function M.join(t, sep)
    return table.concat(t, sep or ",")
 end
 
+-- goto/continue: accumulates only non-negative values.
+-- Both branches of `if v < 0` are exercisable:
+--   taken    → goto skip (negative input)
+--   not taken → total = total + v (non-negative input)
+function M.goto_filter(t)
+   local total = 0
+   for _, v in ipairs(t) do
+      if v < 0 then
+         goto skip
+      end
+      total = total + v
+      ::skip::
+   end
+   return total
+end
+
+-- goto with multiple forward labels: returns the first positive value,
+-- or -1 if none found.
+--   if v > 0  → goto found  (early exit with value)
+--   end of loop → goto done (fall-through, no positive found)
+function M.goto_first_match(t)
+   local result = -1
+   for _, v in ipairs(t) do
+      if v > 0 then
+         result = v
+         goto found
+      end
+   end
+   goto done
+   ::found::
+   ::done::
+   return result
+end
+
+-- goto uncovered: never called from run_test.lua, so the conditional
+-- goto branch stays fully uncovered in the report.
+function M.goto_early_return(err)
+   local result
+   if err then
+      goto bail
+   end
+   result = "ok"
+   ::bail::
+   if result then return result end
+   return nil, err
+end
+
 return M
