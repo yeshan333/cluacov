@@ -1,0 +1,94 @@
+name: asan
+
+on:
+  push:
+    branches: master
+  pull_request:
+    branches: '*'
+
+# Regression workflow: runs the cluacov test suite under
+# AddressSanitizer + UndefinedBehaviorSanitizer + LeakSanitizer to
+# catch use-after-free, OOB reads/writes, UB, and leaks in the C
+# extensions (pchook.c, hook.c, deepbranches.c, deepactivelines.c).
+#
+# Lua 5.5 only — same C code is exercised on 5.4, so a single-version
+# guard is enough for the regression signal we want.
+#
+# This workflow mirrors `mise.toml`'s `asan:55` task. If you change the
+# sanitizer flags / suppressions / canary / ASAN_OPTIONS in mise.toml,
+# update this workflow too.
+
+jobs:
+  asan-lua-5_5:
+    name: ASan + UBSan + LSan (Lua 5.5)
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Checkout luacov
+      uses: actions/checkout@v4
+      with:
+        repository: lunarmodules/luacov
+        path: luacov-src
+        ref: master
+
+    - uses: luarocks/gh-actions-lua@master
+      with:
+        luaVersion: "5.5"
+
+    - uses: luarocks/gh-actions-luarocks@master
+      with:
+        luaRocksVersion: "3.13.0"
+
+    - name: Install luacov from its repository
+      working-directory: luacov-src
+      run: luarocks make
+
+    - name: Show toolchain
+      run: |
+        gcc --version | head -1
+        ldconfig -p | grep -i 'libasan\.so' | head -3 || true
+        lua -v
+        luarocks --version | head -1
+
+    # Positive control: prove LSan is functional in this CI environment
+    # BEFORE we declare a clean cluacov run "no leaks". A clean run with
+    # broken LSan would be a silent false negative.
+    - name: LSan canary
+      run: ./spec/asan_lsan_canary.sh
+
+    - name: Install busted (test runner)
+      run: luarocks install busted
+
+    - name: Build cluacov with sanitizers
+      run: |
+        set -eu
+        export CFLAGS="-O0 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-common"
+        export LDFLAGS="-fsanitize=address,undefined"
+        luarocks make cluacov-dev-1.rockspec
+
+    - name: Run busted + e2e under ASan/UBSan/LSan
+      # halt_on_error=1 (the default) is REQUIRED — with halt_on_error=0,
+      # LSan prints leak reports but the process still exits 0, so a real
+      # leak in cluacov's C code would print red noise while the job
+      # reports green. abort_on_error=0 only swaps SIGABRT for orderly
+      # exit; the non-zero exit code from halt_on_error=1 still propagates.
+      run: |
+        set -eu
+        ASAN_LIB="$(gcc -print-file-name=libasan.so)"
+        if [ ! -e "$ASAN_LIB" ]; then
+          echo "asan: cannot locate libasan.so (got $ASAN_LIB)." >&2
+          exit 1
+        fi
+
+        export ASAN_OPTIONS="abort_on_error=0:detect_leaks=1:print_stacktrace=1"
+        export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
+        export LSAN_OPTIONS="suppressions=$PWD/spec/asan_lsan_suppressions.txt:print_suppressions=1"
+        export LD_PRELOAD="$ASAN_LIB"
+
+        echo "==> busted (ASan)"
+        busted
+
+        echo "==> e2e (ASan)"
+        ./e2e/run_all.sh

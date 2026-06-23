@@ -2,7 +2,9 @@
 *.so
 e2e/output/
 
-# luarocks --tree=. local build artifacts
+# luarocks --tree=. local build artifacts (used by e2e:54/e2e:55 and
+# asan:54/asan:55 — the latter overwrite the same tree with sanitizer-
+# instrumented .so files, see CONTRIBUTING.md "Footgun" note).
 /bin/
 /lib/
 /share/
