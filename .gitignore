@@ -6,3 +6,7 @@ e2e/output/
 /bin/
 /lib/
 /share/
+.luarocks/
+
+# Lua compiler output
+luac.out

@@ -409,6 +409,48 @@ describe("branchcov", function()
             end
             assert.is_nil(assert_branch)
          end)
+
+         it("demonstrates the limitation where success path of assert is a merge point for other control flows", function()
+            local func = load_function([[
+               return function(err, jump)
+                  if jump then
+                     goto merge_point
+                  end
+                  assert(err)
+                  ::merge_point::
+                  local x = 1
+               end
+            ]])
+
+            pchook.start()
+            func(true, true)
+            pcall(func, false, false)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            local assert_branch = nil
+            for _, b in ipairs(result.branches) do
+               if b.kind == "assert" then
+                  assert_branch = b
+                  break
+               end
+            end
+            assert.is_not_nil(assert_branch)
+
+            local success_hits = 0
+            local failure_hits = 0
+            for _, t in ipairs(assert_branch.targets) do
+               if t.pc < 0 then
+                  failure_hits = t.hits
+               else
+                  success_hits = t.hits
+               end
+            end
+
+            assert.equal(1, success_hits)
+            assert.equal(0, failure_hits)
+            assert.equal("partial", assert_branch.status)
+         end)
       end)
 
       describe("get_line_hits", function()
