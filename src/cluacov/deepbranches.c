@@ -31,8 +31,10 @@
 #error unsupported Lua version
 #endif
 
-#ifndef gco2ts
-#define gco2ts(o)  ((TString *)(o))
+#if LUA_VERSION_NUM == 501
+#define get_string_value(o)  getstr((TString *)((o)->value.gc))
+#else
+#define get_string_value(o)  getstr((TString *)(val_(o).gc))
 #endif
 #else /* LuaJIT */
 #include "luajit.h"
@@ -206,7 +208,7 @@ static int is_assert_call(const Proto *proto, int pc, int reg) {
             if (op == OP_GETTABUP) {
                 int k = GETARG_C(inst);
                 if (k < proto->sizek && ttisstring(&proto->k[k])) {
-                    const char *name = getstr(tsvalue(&proto->k[k]));
+                    const char *name = get_string_value(&proto->k[k]);
                     if (strcmp(name, "assert") == 0) {
                         return 1;
                     }
@@ -227,7 +229,7 @@ static int is_assert_call(const Proto *proto, int pc, int reg) {
             if (op == OP_GETGLOBAL) {
                 int k = GETARG_Bx(inst);
                 if (k < proto->sizek && ttisstring(&proto->k[k])) {
-                    const char *name = getstr(tsvalue(&proto->k[k]));
+                    const char *name = get_string_value(&proto->k[k]);
                     if (strcmp(name, "assert") == 0) {
                         return 1;
                     }
