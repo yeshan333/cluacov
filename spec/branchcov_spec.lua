@@ -312,6 +312,145 @@ describe("branchcov", function()
             assert.equal(1, success_hits)
             assert.equal(1, failure_hits)
          end)
+
+         it("safely ignores assert tail calls", function()
+            local func = load_function([[
+               return function(x)
+                  return assert(x)
+               end
+            ]])
+
+            pchook.start()
+            func(true)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            assert.equal(0, #result.branches)
+         end)
+
+         it("handles nested assert wrapped inside pcall", function()
+            local func = load_function([[
+               return function(x)
+                  pcall(function()
+                     assert(x)
+                  end)
+               end
+            ]])
+
+            pchook.start()
+            func(true)
+            func(false)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            local assert_branch = nil
+            for _, b in ipairs(result.branches) do
+               if b.kind == "assert" then
+                  assert_branch = b
+                  break
+               end
+            end
+            assert.is_not_nil(assert_branch)
+            assert.equal("covered", assert_branch.status)
+         end)
+
+         it("handles aliased assert upvalues correctly", function()
+            local func = load_function([[
+               return function(x)
+                  local assert = assert
+                  local inner = function(y)
+                     assert(y)
+                  end
+                  inner(x)
+                  return inner
+               end
+            ]])
+
+            pchook.start()
+            local inner = func(true)
+            pcall(inner, false)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            local assert_branch = nil
+            for _, b in ipairs(result.branches) do
+               if b.kind == "assert" then
+                  assert_branch = b
+                  break
+               end
+            end
+            assert.is_not_nil(assert_branch)
+            assert.equal("covered", assert_branch.status)
+         end)
+
+         it("safely ignores non-assert named upvalue aliases", function()
+            local func = load_function([[
+               return function(x)
+                  local my_assert = assert
+                  local inner = function(y)
+                     my_assert(y)
+                  end
+                  inner(x)
+                  return inner
+               end
+            ]])
+
+            pchook.start()
+            local inner = func(true)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            local assert_branch = nil
+            for _, b in ipairs(result.branches) do
+               if b.kind == "assert" then
+                  assert_branch = b
+                  break
+               end
+            end
+            assert.is_nil(assert_branch)
+         end)
+
+         it("demonstrates the limitation where success path of assert is a merge point for other control flows", function()
+            local func = load_function([[
+               return function(err, jump)
+                  if jump then
+                     goto merge_point
+                  end
+                  assert(err)
+                  ::merge_point::
+                  local x = 1
+               end
+            ]])
+
+            pchook.start()
+            func(true, true)
+            pcall(func, false, false)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            local assert_branch = nil
+            for _, b in ipairs(result.branches) do
+               if b.kind == "assert" then
+                  assert_branch = b
+                  break
+               end
+            end
+            assert.is_not_nil(assert_branch)
+
+            local success_hits = 0
+            local failure_hits = 0
+            for _, t in ipairs(assert_branch.targets) do
+               if t.pc < 0 then
+                  failure_hits = t.hits
+               else
+                  success_hits = t.hits
+               end
+            end
+
+            assert.equal(1, success_hits)
+            assert.equal(0, failure_hits)
+            assert.equal("partial", assert_branch.status)
+         end)
       end)
 
       describe("get_line_hits", function()
