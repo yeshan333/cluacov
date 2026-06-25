@@ -129,6 +129,22 @@ describe("deepbranches", function()
             assert.same({3, 5}, branch_lines(branches[1]))
          end)
 
+         it("finds branches for assert calls", function()
+            local func = load_function([[
+                return function(a)
+                   assert(a)
+                end
+            ]])
+            local info = debug.getinfo(func, "S")
+            local branches = normalize(deepbranches.get(func))
+
+            assert.equal(1, #branches)
+            assert_branch_shape(branches[1], info.linedefined)
+            assert.equal(2, branches[1].line)
+            assert.equal("assert", branches[1].kind)
+            assert.same({2, 3}, branch_lines(branches[1]))
+         end)
+
           it("preserves multiple branch sites on the same source line", function()
             local func = load_function([[
                 return function(a, b, c)

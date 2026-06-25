@@ -260,6 +260,58 @@ describe("branchcov", function()
             assert.is_true(#result.branches >= 1)
             assert.is_true(result.total >= 2)
          end)
+
+         it("handles lua assert as branch", function()
+            local func = load_function([[
+               return function(x)
+                  assert(x)
+                  return 3
+               end
+            ]])
+
+            -- Scenario 1: Only true case executed
+            pchook.start()
+            func(true)
+            pchook.stop()
+
+            local result = branchcov.analyze(func)
+            assert.equal(1, #result.branches)
+            local branch = result.branches[1]
+            assert.equal("assert", branch.kind)
+            assert.equal("partial", branch.status)
+            -- Check targets: one should have hit > 0, the other should be 0.
+            local success_hits = 0
+            local failure_hits = 0
+            for _, t in ipairs(branch.targets) do
+               if t.pc < 0 then
+                  failure_hits = t.hits
+               else
+                  success_hits = t.hits
+               end
+            end
+            assert.equal(1, success_hits)
+            assert.equal(0, failure_hits)
+
+            -- Scenario 2: Both true and false cases executed
+            pchook.reset()
+            pchook.start()
+            func(true)
+            pcall(func, false)
+            pchook.stop()
+
+            result = branchcov.analyze(func)
+            branch = result.branches[1]
+            assert.equal("covered", branch.status)
+            for _, t in ipairs(branch.targets) do
+               if t.pc < 0 then
+                  failure_hits = t.hits
+               else
+                  success_hits = t.hits
+               end
+            end
+            assert.equal(1, success_hits)
+            assert.equal(1, failure_hits)
+         end)
       end)
 
       describe("get_line_hits", function()

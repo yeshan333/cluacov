@@ -431,4 +431,16 @@ function M.goto_early_return(err)
    return nil, err
 end
 
+-- assert: exercises assert branches
+function M.verify_assert(val)
+   assert(val, "value must be truthy")
+   return "ok"
+end
+
+-- assert: exercises partial assert branches (always true)
+function M.verify_partial_assert(val)
+   assert(val, "always true in test")
+   return "partial-ok"
+end
+
 return M

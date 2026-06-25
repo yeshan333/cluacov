@@ -1,5 +1,6 @@
 #include "lua.h"
 #include "lauxlib.h"
+#include <string.h>
 
 #if LUA_VERSION_NUM > 501 || defined(LUAI_BITSINT)
 #define PUCRIOLUA
@@ -28,6 +29,10 @@
 #include "lua55/lopcodes.h"
 #else
 #error unsupported Lua version
+#endif
+
+#ifndef gco2ts
+#define gco2ts(o)  ((TString *)(o))
 #endif
 #else /* LuaJIT */
 #include "luajit.h"
@@ -115,13 +120,18 @@ static int get_jump_target_pc(int pc, Instruction instruction) {
 #endif
 }
 
-static void push_target(lua_State *L, const Proto *proto, int pc) {
+static void push_target(lua_State *L, const Proto *proto, int pc, int fallback_line) {
     lua_newtable(L);
 
-    lua_pushinteger(L, pc + 1);
+    if (pc >= 0) {
+        lua_pushinteger(L, pc + 1);
+    } else {
+        lua_pushinteger(L, pc);
+    }
     lua_setfield(L, -2, "pc");
 
-    lua_pushinteger(L, get_pc_line(proto, pc));
+    int line = (pc >= 0) ? get_pc_line(proto, pc) : fallback_line;
+    lua_pushinteger(L, line);
     lua_setfield(L, -2, "line");
 }
 
@@ -141,10 +151,12 @@ static void add_branch_site(
         return;
     }
 
-    if (first_target_pc < 0 || second_target_pc < 0 ||
-        first_target_pc >= proto->sizecode ||
-        second_target_pc >= proto->sizecode) {
-        return;
+    if (strcmp(kind, "assert") != 0) {
+        if (first_target_pc < 0 || second_target_pc < 0 ||
+            first_target_pc >= proto->sizecode ||
+            second_target_pc >= proto->sizecode) {
+            return;
+        }
     }
 
     if (second_target_pc < first_target_pc) {
@@ -174,13 +186,61 @@ static void add_branch_site(
     lua_setfield(L, -2, "kind");
 
     lua_newtable(L);
-    push_target(L, proto, first_target_pc);
+    push_target(L, proto, first_target_pc, line);
     lua_rawseti(L, -2, 1);
-    push_target(L, proto, second_target_pc);
+    push_target(L, proto, second_target_pc, line);
     lua_rawseti(L, -2, 2);
     lua_setfield(L, -2, "targets");
 
     lua_rawseti(L, result_index, ++(*count));
+}
+
+static int is_assert_call(const Proto *proto, int pc, int reg) {
+    int i;
+    for (i = pc - 1; i >= 0; i--) {
+        Instruction inst = proto->code[i];
+        OpCode op = GET_OPCODE(inst);
+        if (GETARG_A(inst) == reg) {
+            /* We found the instruction that writes to 'reg'. */
+#if LUA_VERSION_NUM >= 502
+            if (op == OP_GETTABUP) {
+                int k = GETARG_C(inst);
+                if (k < proto->sizek && ttisstring(&proto->k[k])) {
+                    const char *name = getstr(tsvalue(&proto->k[k]));
+                    if (strcmp(name, "assert") == 0) {
+                        return 1;
+                    }
+                }
+            } else if (op == OP_GETUPVAL) {
+                int b = GETARG_B(inst);
+                if (b < proto->sizeupvalues && proto->upvalues[b].name != NULL) {
+                    const char *name = getstr(proto->upvalues[b].name);
+                    if (strcmp(name, "assert") == 0) {
+                        return 1;
+                    }
+                }
+            } else if (op == OP_MOVE) {
+                reg = GETARG_B(inst);
+                continue;
+            }
+#else /* Lua 5.1 */
+            if (op == OP_GETGLOBAL) {
+                int k = GETARG_Bx(inst);
+                if (k < proto->sizek && ttisstring(&proto->k[k])) {
+                    const char *name = getstr(tsvalue(&proto->k[k]));
+                    if (strcmp(name, "assert") == 0) {
+                        return 1;
+                    }
+                }
+            } else if (op == OP_MOVE) {
+                reg = GETARG_B(inst);
+                continue;
+            }
+#endif
+            return 0;
+        }
+    }
+    return 0;
 }
 
 static int is_test_opcode(OpCode opcode) {
@@ -330,6 +390,23 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
             continue;
         }
 #endif
+
+        if (opcode == OP_CALL) {
+            int reg = GETARG_A(instruction);
+            if (is_assert_call(proto, pc, reg)) {
+                add_branch_site(
+                    L,
+                    proto,
+                    result_index,
+                    count,
+                    pc,
+                    "assert",
+                    pc + 1,
+                    -(pc + 1)
+                );
+            }
+            continue;
+        }
     }
 
     for (pc = 0; pc < proto->sizep; pc++) {

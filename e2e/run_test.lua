@@ -165,4 +165,11 @@ assert(p.x == 4 and p.y == 5)
 assert(sample.join({}, ",") == "")
 assert(sample.join({"a", "b", "c"}, "-") == "a-b-c")
 
+-- assert: cover both success and failure paths
+assert(sample.verify_assert(true) == "ok")
+pcall(sample.verify_assert, false)
+
+-- assert: cover success path only (partial coverage)
+assert(sample.verify_partial_assert(true) == "partial-ok")
+
 print("E2E test passed")
