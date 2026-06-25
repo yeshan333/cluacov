@@ -207,6 +207,13 @@ static int is_assert_call(const Proto *proto, int pc, int reg) {
 #if LUA_VERSION_NUM >= 502
             if (op == OP_GETTABUP) {
                 int k = GETARG_C(inst);
+#if LUA_VERSION_NUM < 504
+                if (ISK(k)) {
+                    k = INDEXK(k);
+                } else {
+                    k = proto->sizek;
+                }
+#endif
                 if (k < proto->sizek && ttisstring(&proto->k[k])) {
                     const char *name = get_string_value(&proto->k[k]);
                     if (strcmp(name, "assert") == 0) {
