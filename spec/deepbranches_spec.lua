@@ -130,11 +130,12 @@ describe("deepbranches", function()
          end)
 
          it("finds branches for assert calls", function()
-            local func = load_function([[
-                return function(a)
-                   assert(a)
-                end
-            ]])
+             local func = load_function([[
+                 return function(a)
+                    assert(a)
+                    a = 1
+                 end
+             ]])
             local info = debug.getinfo(func, "S")
             local branches = normalize(deepbranches.get(func))
 
