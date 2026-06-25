@@ -30,7 +30,17 @@ function M.analyze(func)
       local targets_hit = 0
 
       for _, target in ipairs(branch.targets) do
-         local target_hits = proto_hits[target.pc] or 0
+         local target_hits
+         if target.pc < 0 then
+            local call_pc = -target.pc
+            local success_pc = call_pc + 1
+            local call_hits = proto_hits[call_pc] or 0
+            local success_hits = proto_hits[success_pc] or 0
+            target_hits = call_hits - success_hits
+            if target_hits < 0 then target_hits = 0 end
+         else
+            target_hits = proto_hits[target.pc] or 0
+         end
          targets[#targets + 1] = {
             pc = target.pc,
             line = target.line,

@@ -286,7 +286,17 @@ local function write_lcov(config, all_line_hits, all_hits)
          local branch_hit = (proto_hits[b.pc] or 0) > 0
          brf = brf + #b.targets
          for ti, t in ipairs(b.targets) do
-            local taken = branch_hit and (proto_hits[t.pc] or 0) or 0
+            local taken
+            if t.pc < 0 then
+               local call_pc = -t.pc
+               local success_pc = call_pc + 1
+               local call_hits = proto_hits[call_pc] or 0
+               local success_hits = proto_hits[success_pc] or 0
+               local diff = call_hits - success_hits
+               taken = branch_hit and (diff > 0 and diff or 0) or 0
+            else
+               taken = branch_hit and (proto_hits[t.pc] or 0) or 0
+            end
             fd:write(string.format("BRDA:%d,%d,%d,%s\n",
                b.line, block_id, ti - 1,
                taken > 0 and tostring(taken) or "-"))
