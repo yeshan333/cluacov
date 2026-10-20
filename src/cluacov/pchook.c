@@ -56,6 +56,34 @@ static char SNAPSHOT_LINE_HITS_KEY;
 static char SNAPSHOT_ALL_HITS_KEY;
 static char HOOK_ACTIVE_KEY;
 
+/* Check the new state prefixes before exposing any API that traverses allgc.
+ * Public API values validate the allocator/registry offsets. A freshly created
+ * thread is the allgc head in stock Lua 5.4/5.5, so the head can be checked
+ * without following an unvalidated GC pointer. The probe is stack-anchored;
+ * it becomes ordinary collectible garbage afterwards.
+ *
+ * This is a sanity check, not an ABI sandbox: reading l_G itself still assumes
+ * the stock lua_State prefix. Custom Lua builds must use matching headers.
+ */
+static void check_state_layout(lua_State *L) {
+    void *ud;
+    lua_Alloc alloc = lua_getallocf(L, &ud);
+    global_State *g = L->l_G;
+    lua_State *probe;
+
+    if (g == NULL || g->frealloc != alloc || g->ud != ud ||
+        !ttistable(&g->l_registry) ||
+        (const void *)val_(&g->l_registry).gc != lua_topointer(L, LUA_REGISTRYINDEX)) {
+        luaL_error(L, "cluacov.pchook: incompatible Lua state layout (allocator/registry)");
+    }
+
+    probe = lua_newthread(L);
+    if (g->allgc != (GCObject *)probe || probe->tt != LUA_VTHREAD || probe->l_G != g) {
+        luaL_error(L, "cluacov.pchook: incompatible Lua state layout (thread/allgc)");
+    }
+    lua_pop(L, 1);
+}
+
 static Proto *get_proto(lua_State *L, int idx) {
     return ((Closure *) lua_topointer(L, idx))->l.p;
 }
@@ -405,6 +433,30 @@ static int l_get_all_hits(lua_State *L);
 static void aggregate_all_hits(lua_State *L, int result_idx);
 static void aggregate_all_line_hits(lua_State *L, int result_idx);
 
+/*
+ * Install/remove the hook on every existing thread, including coroutine.wrap
+ * threads hidden in C closures and threads resumed through cached/C APIs.
+ * New threads inherit the hook from their creator (lua_newthread).
+ *
+ * This pass only reads the GC list and calls lua_gethook/lua_sethook, which
+ * do not allocate or run Lua/GC. Never keep these raw pointers after the pass.
+ * In particular, do not retain threads and prevent their normal collection.
+ */
+static void set_thread_hooks(lua_State *L, int mask) {
+    GCObject *object;
+    for (object = L->l_G->allgc; object != NULL; object = object->next) {
+        if (object->tt == LUA_VTHREAD) {
+            lua_State *thread = (lua_State *)object;
+            if (mask != 0) {
+                lua_sethook(thread, pc_hook, mask, 1);
+            } else if (lua_gethook(thread) == pc_hook) {
+                /* Leave hooks installed by somebody else after start alone. */
+                lua_sethook(thread, NULL, 0, 0);
+            }
+        }
+    }
+}
+
 static int l_start(lua_State *L) {
     int mask;
 
@@ -479,18 +531,18 @@ static int l_start(lua_State *L) {
         lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
     }
 
-    lua_sethook(L, pc_hook, mask, 1);
     lua_pushboolean(L, 1);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
+    set_thread_hooks(L, mask);
     return 0;
 }
 
 static int l_stop(lua_State *L) {
     int result_idx;
 
-    /* Drop the hook first so no further pc_hook callback can fire. After
-       this, PCHOOK entries are guaranteed to be immutable. */
-    lua_sethook(L, NULL, 0, 0);
+    /* Stop all threads before caching snapshots: a suspended coroutine
+       resumed after stop must not mutate the underlying hit tables. */
+    set_thread_hooks(L, 0);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
 
@@ -1081,6 +1133,9 @@ static int l_get_func_defs(lua_State *L) {
 #endif
 
 int luaopen_cluacov_pchook(lua_State *L) {
+#if defined(PUCRIOLUA) && LUA_VERSION_NUM >= 504
+    check_state_layout(L);
+#endif
     lua_newtable(L);
 
     lua_pushcfunction(L, l_start);
