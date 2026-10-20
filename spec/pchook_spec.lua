@@ -123,6 +123,25 @@ end
             debug.sethook(replaced)
          end)
 
+         it("replaces a preexisting coroutine hook and does not restore it after stop", function()
+            local body = load_function("return function() coroutine.yield('covered'); return 'stopped' end")
+            local co = coroutine.create(body)
+            local external_calls = 0
+            local external_hook = function() external_calls = external_calls + 1 end
+            debug.sethook(co, external_hook, "l", 3)
+            assert.equal(external_hook, debug.gethook(co))
+
+            pchook.start()
+            assert.same({ true, "covered" }, { coroutine.resume(co) })
+            pchook.stop()
+            local hits = pchook.get_line_hits(body)
+            assert.is_true((hits[1] or 0) > 0, "an existing hook must not cause missed coverage")
+            assert.is_nil(debug.gethook(co), "start takes ownership; stop does not restore the old hook")
+            assert.same({ true, "stopped" }, { coroutine.resume(co) })
+            assert.equal(0, external_calls)
+            assert.same(hits, pchook.get_line_hits(body))
+         end)
+
          it("runs tick callbacks and records hits in a coroutine created before start", function()
             local body = load_function([[
 return function()

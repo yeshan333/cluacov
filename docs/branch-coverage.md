@@ -304,6 +304,20 @@ freezing the reports; it preserves hooks replaced by another tool.
 Neither operation replaces `coroutine.create`, `wrap`, or `resume`.
 Only instructions executed while collection is active are recorded.
 
+The collector takes exclusive ownership of each thread's debug hook:
+`start()` overwrites preexisting hooks and `stop()` does not restore them.
+Do not run the LuaCov runner (for example, Busted's `-c`), a debugger, or
+another hook-based collector at the same time. Preserving a hook replaced
+after start only avoids interfering with its owner; it does not enable
+simultaneous collection. That thread and children inheriting its replacement
+hook may have missing coverage.
+
+At module load, the collector checks the allocator and registry against Lua's
+public API, then validates the GC list head using a new coroutine. A detected
+mismatch raises an error before list traversal or hook installation. This is
+not a complete ABI compatibility guarantee: reading `lua_State.l_G` still
+assumes the stock layout; custom Lua builds require matching internal headers.
+
 `pchook.get_hits(func)` walks the function's Proto tree (including nested
 functions) and returns an array of entries:
 
