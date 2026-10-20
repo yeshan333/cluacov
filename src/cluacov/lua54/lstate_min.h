@@ -1,8 +1,9 @@
 /*
 ** Minimal state definitions for cluacov.pchook, from Lua 5.4 lstate.h.
-** Only fields up to u.l.savedpc need correct layout;
-** fields after u are omitted (they differ between 5.4 and 5.5
-** but do not affect the offset of savedpc).
+** CallInfo is needed through u.l.savedpc, lua_State through l_G,
+** and global_State through allgc. These are prefixes, not complete types;
+** never allocate them or use their sizeof as the runtime object size.
+** pchook checks allocator/registry/allgc offsets at module load.
 **
 ** Requires lobject.h to be included first (for StkIdRel, Instruction).
 */

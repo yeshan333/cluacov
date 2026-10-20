@@ -49,3 +49,7 @@ jobs:
     - name: Tests
       run: |
         busted -o htest
+
+    - name: Reject incompatible state layouts before taking ownership of hooks
+      if: matrix.os == 'ubuntu-latest' && (matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5')
+      run: python3 spec/check_state_layout.py --include "$(luarocks config variables.LUA_INCDIR)"

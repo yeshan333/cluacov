@@ -56,6 +56,34 @@ static char SNAPSHOT_LINE_HITS_KEY;
 static char SNAPSHOT_ALL_HITS_KEY;
 static char HOOK_ACTIVE_KEY;
 
+/* Check the new state prefixes before exposing any API that traverses allgc.
+ * Public API values validate the allocator/registry offsets. A freshly created
+ * thread is the allgc head in stock Lua 5.4/5.5, so the head can be checked
+ * without following an unvalidated GC pointer. The probe is stack-anchored;
+ * it becomes ordinary collectible garbage afterwards.
+ *
+ * This is a sanity check, not an ABI sandbox: reading l_G itself still assumes
+ * the stock lua_State prefix. Custom Lua builds must use matching headers.
+ */
+static void check_state_layout(lua_State *L) {
+    void *ud;
+    lua_Alloc alloc = lua_getallocf(L, &ud);
+    global_State *g = L->l_G;
+    lua_State *probe;
+
+    if (g == NULL || g->frealloc != alloc || g->ud != ud ||
+        !ttistable(&g->l_registry) ||
+        (const void *)val_(&g->l_registry).gc != lua_topointer(L, LUA_REGISTRYINDEX)) {
+        luaL_error(L, "cluacov.pchook: incompatible Lua state layout (allocator/registry)");
+    }
+
+    probe = lua_newthread(L);
+    if (g->allgc != (GCObject *)probe || probe->tt != LUA_VTHREAD || probe->l_G != g) {
+        luaL_error(L, "cluacov.pchook: incompatible Lua state layout (thread/allgc)");
+    }
+    lua_pop(L, 1);
+}
+
 static Proto *get_proto(lua_State *L, int idx) {
     return ((Closure *) lua_topointer(L, idx))->l.p;
 }
@@ -1105,6 +1133,9 @@ static int l_get_func_defs(lua_State *L) {
 #endif
 
 int luaopen_cluacov_pchook(lua_State *L) {
+#if defined(PUCRIOLUA) && LUA_VERSION_NUM >= 504
+    check_state_layout(L);
+#endif
     lua_newtable(L);
 
     lua_pushcfunction(L, l_start);
