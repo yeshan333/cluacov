@@ -296,6 +296,14 @@ Calling `start()` again while the hook is already active is a no-op. Calling
 `stop()` and then `start()` resumes the same accumulated dataset; use
 `reset()` when you want a fresh collection.
 
+Collection applies to the whole Lua state: `start()` installs the hook on
+the main thread and all existing coroutines, including suspended threads
+and threads held by `coroutine.wrap` closures. New coroutines inherit their
+creator's hook. `stop()` removes cluacov's hook from every thread before
+freezing the reports; it preserves hooks replaced by another tool.
+Neither operation replaces `coroutine.create`, `wrap`, or `resume`.
+Only instructions executed while collection is active are recorded.
+
 `pchook.get_hits(func)` walks the function's Proto tree (including nested
 functions) and returns an array of entries:
 
@@ -357,7 +365,9 @@ This is instruction-coverage (was this PC executed?), not edge-coverage
 - **Lua 5.4+** required (accesses `CallInfo.u.l.savedpc` via vendored headers)
 - The function passed to `get_hits` must be the **same object** that was
   executed under `pchook.start()`
-- Coroutines created after `pchook.start()` inherit the active hook in the
-  supported PUC-Rio Lua runtimes, so their executed bodies contribute coverage.
+- Coroutines created before or after `pchook.start()` contribute coverage
+  while collection is active. Code executed before `start()` is not backfilled.
+- Each thread has one debug hook. Replacing it with another collector or
+  debugger during collection interrupts coverage on that thread.
 - Lua 5.1–5.3: `pchook.start()` raises an error; `get_hits()` returns empty
 - LuaJIT: same as 5.1–5.3

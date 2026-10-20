@@ -277,6 +277,13 @@ pchook.reset()                     -- 清空所有记录数据（采集继续运
 不会重置当前采样；`stop()` 后重新 `start()` 会继续累积现有数据，若要开启
 新一轮采样应调用 `reset()`。
 
+采集作用于整个 Lua 状态：`start()` 会给主线程和所有已有协程安装 hook，
+包括已挂起的协程及 `coroutine.wrap` 闭包持有的协程。新协程继承创建者的
+hook。`stop()` 会先移除所有线程上的 cluacov hook，再固定报告数据；
+若其他工具已经替换某个线程的 hook，则保留该替代 hook。
+这些操作不替换 `coroutine.create`、`wrap` 或 `resume`。
+仅记录采集期间执行的指令，不会补记启动前执行过的代码。
+
 `pchook.get_hits(func)` 遍历函数的 Proto 树（包括嵌套函数），
 返回一个条目数组：
 
@@ -332,7 +339,9 @@ local result = branchcov.analyze(func)
 
 - 需要 **Lua 5.4+**（通过 vendored 头文件访问 `CallInfo.u.l.savedpc`）
 - 传给 `get_hits` 的函数必须是在 `pchook.start()` 下**实际执行**过的同一对象
-- 在支持的 PUC-Rio Lua 运行时里，`pchook.start()` 之后创建的 coroutine 会继承
-  当前 hook，因此其函数体执行会计入覆盖率。
+- `pchook.start()` 前后创建的协程，都能记录采集期间执行的代码。
+  启动前已经执行过的代码不会补记。
+- 每个线程只有一个调试 hook；采集期间若被其他采集器或调试器替换，
+  该线程的覆盖率采集会中断。
 - Lua 5.1–5.3：`pchook.start()` 会报错；`get_hits()` 返回空表
 - LuaJIT：同 5.1–5.3
