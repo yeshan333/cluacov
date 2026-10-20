@@ -48,6 +48,76 @@ end
 
 local cases = {
    {
+      id = "created_before_start",
+      name = "a coroutine created before collection records coverage through a cached resume",
+      before_start = [[
+local resume = coroutine.resume
+local co = coroutine.create(function() return target.exchange() end)
+]],
+      workload = [[
+assert(select(2, resume(co)) == "request")
+assert(select(2, resume(co, "rpc")) == "rpc:waiting")
+local ok, result = resume(co, "reply")
+assert(ok and result == "reply:ok")
+assert(coroutine.status(co) == "dead")
+]],
+      lines = { request = 1, waiting = 1, decision = 1, success = 1 },
+      branches = { 1, 0 },
+   },
+   {
+      id = "suspended_before_start",
+      name = "a coroutine suspended before collection records coverage when resumed",
+      before_start = [[
+local co = coroutine.create(function()
+   coroutine.yield("ready")
+   return target.exchange()
+end)
+assert(select(2, coroutine.resume(co)) == "ready")
+]],
+      workload = [[
+assert(select(2, coroutine.resume(co)) == "request")
+assert(select(2, coroutine.resume(co, "rpc")) == "rpc:waiting")
+local ok, result = coroutine.resume(co, false)
+assert(ok and result == "timeout")
+assert(coroutine.status(co) == "dead")
+]],
+      lines = { request = 1, waiting = 1, decision = 1, timeout = 1 },
+      branches = { 0, 1 },
+   },
+   {
+      id = "wrapped_before_start",
+      name = "a coroutine.wrap closure created before collection records its resumed branches",
+      before_start = [[
+local next_response = coroutine.wrap(function() return target.exchange() end)
+]],
+      workload = [[
+assert(next_response() == "request")
+assert(next_response("rpc") == "rpc:waiting")
+assert(next_response("reply") == "reply:ok")
+]],
+      lines = { request = 1, waiting = 1, decision = 1, success = 1 },
+      branches = { 1, 0 },
+   },
+   {
+      id = "child_of_preexisting_coroutine",
+      name = "a child created by a preexisting coroutine inherits collection after start",
+      before_start = [[
+local parent = coroutine.create(function()
+   local child = coroutine.wrap(target.exchange)
+   assert(child() == "request")
+   assert(child("rpc") == "rpc:waiting")
+   return child("reply")
+end)
+]],
+      workload = [[
+local ok, result = coroutine.resume(parent)
+assert(ok and result == "reply:ok")
+assert(coroutine.status(parent) == "dead")
+]],
+      lines = { request = 1, waiting = 1, decision = 1, success = 1 },
+      branches = { 1, 0 },
+   },
+   {
       id = "create",
       name = "coroutine.create records both resumes and only the successful response branch",
       workload = [[
@@ -202,13 +272,15 @@ for _, case in ipairs(cases) do
 package.path = %q .. "/src/?.lua;" .. package.path
 package.cpath = %q .. "/lib/lua/" .. %q .. "/?.so;" .. package.cpath
 local saved_create, saved_wrap = coroutine.create, coroutine.wrap
+local target
+%s
 require("cluacov.runner")
 assert(not package.loaded["luacov.runner"], "only cluacov.runner should be active")
 assert(coroutine.create == saved_create and coroutine.wrap == saved_wrap,
    "cluacov.runner should preserve native coroutine factories")
-local target = dofile("./target.lua")
+target = dofile("./target.lua")
 %s
-]], repo_root, repo_root, lua_version, case.workload)
+]], repo_root, repo_root, lua_version, case.before_start or "", case.workload)
    write_file(directory .. "/child.lua", child)
    execute("cd " .. shell_quote(directory) .. " && LUACOV_CONFIG=.luacov lua child.lua")
    check_report(directory, case)
