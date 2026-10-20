@@ -42,6 +42,136 @@ describe("pchook", function()
          end)
       end)
       describe("start/stop lifecycle", function()
+         it("records only the resumed part of a coroutine suspended before start", function()
+            local body = load_function([[
+return function()
+   local before = 1
+   coroutine.yield(before)
+   local after = 2
+   coroutine.yield(after)
+   return 3
+end
+]])
+            local co = coroutine.create(body)
+            assert.same({ true, 1 }, { coroutine.resume(co) })
+            pchook.start()
+            assert.same({ true, 2 }, { coroutine.resume(co) })
+            pchook.stop()
+            local lines = pchook.get_line_hits(body)
+            assert.equal(0, lines[2] or 0, "code before start must not be backfilled")
+            assert.equal(1, lines[4], "code after resume must be collected")
+            assert.same({ true, 3 }, { coroutine.resume(co) })
+            assert.same(lines, pchook.get_line_hits(body), "stop must freeze per-function hits")
+            assert.equal(0, pchook.get_line_hits(body)[6] or 0)
+         end)
+
+         it("stops and restarts collection on an existing coroutine without counting the stopped interval", function()
+            local mark = load_function("return function() local value = 1; return value end")
+            local co = coroutine.create(function()
+               for _ = 1, 3 do
+                  mark()
+                  coroutine.yield("marked")
+               end
+            end)
+            pchook.start()
+            assert.same({ true, "marked" }, { coroutine.resume(co) })
+            pchook.stop()
+            local first = pchook.get_line_hits(mark)
+            local snapshot = pchook.get_all_line_hits()
+            assert.equal(1, first[1])
+            assert.is_nil(debug.gethook(co))
+            assert.same({ true, "marked" }, { coroutine.resume(co) })
+            assert.same(first, pchook.get_line_hits(mark))
+            assert.same(snapshot, pchook.get_all_line_hits())
+            pchook.start()
+            assert.same({ true, "marked" }, { coroutine.resume(co) })
+            pchook.stop()
+            assert.equal(2, pchook.get_line_hits(mark)[1])
+            assert.is_true(coroutine.close(co))
+         end)
+
+         it("starting and stopping from a coroutine also controls the main thread and siblings", function()
+            local main_mark = load_function("return function() return 'main' end")
+            local sibling_mark = load_function("return function() return 'sibling' end")
+            local sibling = coroutine.create(sibling_mark)
+            local controller = coroutine.create(function()
+               pchook.start()
+               coroutine.yield()
+               pchook.stop()
+            end)
+            assert.is_true(coroutine.resume(controller))
+            assert.equal("main", main_mark())
+            assert.same({ true, "sibling" }, { coroutine.resume(sibling) })
+            assert.is_true(coroutine.resume(controller))
+            assert.is_nil(debug.gethook())
+            assert.is_nil(debug.gethook(sibling))
+            assert.equal(1, pchook.get_line_hits(main_mark)[1])
+            assert.equal(1, pchook.get_line_hits(sibling_mark)[1])
+            main_mark()
+            assert.equal(1, pchook.get_line_hits(main_mark)[1])
+         end)
+
+         it("stops inherited coroutine hooks but preserves hooks installed by another tool", function()
+            pchook.start()
+            local inherited = coroutine.create(function() return 1 end)
+            local replaced = coroutine.create(function() return 2 end)
+            local replacement = function() end
+            debug.sethook(replaced, replacement, "l")
+            pchook.stop()
+            assert.is_nil(debug.gethook(inherited))
+            assert.equal(replacement, debug.gethook(replaced))
+            debug.sethook(replaced)
+         end)
+
+         it("runs tick callbacks and records hits in a coroutine created before start", function()
+            local body = load_function([[
+return function()
+   local total = 0
+   for i = 1, 10 do total = total + i end
+   return total
+end
+]])
+            local co = coroutine.create(body)
+            local saves_in_coroutine = 0
+            pchook.start({
+               savestepsize = 1,
+               save_stats = function()
+                  if coroutine.running() == co then
+                     saves_in_coroutine = saves_in_coroutine + 1
+                  end
+               end,
+            })
+            assert.same({ true, 55 }, { coroutine.resume(co) })
+            pchook.stop()
+            assert.is_true(saves_in_coroutine > 0)
+            assert.equal(1, pchook.get_line_hits(body)[2])
+         end)
+
+         for _, mode in ipairs({ "incremental", "generational" }) do
+            it("collects preexisting coroutines across " .. mode .. " GC without retaining dead threads", function()
+               local old_mode = collectgarbage(mode)
+               local ok, err = pcall(function()
+                  local mark = load_function("return function() return 'collected' end")
+                  local live = coroutine.create(mark)
+                  local dead = setmetatable({}, { __mode = "v" })
+                  dead[1] = coroutine.create(function() end)
+                  collectgarbage("collect")
+                  assert.is_nil(dead[1])
+                  pchook.start()
+                  assert.same({ true, "collected" }, { coroutine.resume(live) })
+                  dead[1] = coroutine.create(function() end)
+                  assert.is_true(coroutine.resume(dead[1]))
+                  collectgarbage("collect")
+                  assert.is_nil(dead[1], "collection must not anchor finished coroutines")
+                  pchook.stop()
+                  assert.equal(1, pchook.get_line_hits(mark)[1])
+               end)
+               pchook.stop()
+               collectgarbage(old_mode)
+               assert.is_true(ok, tostring(err))
+            end)
+         end
+
          it("starts and stops without error", function()
             assert.has_no.errors(function()
                pchook.start()
@@ -1285,13 +1415,8 @@ describe("pchook", function()
       end)
 
       describe("coroutines", function()
-         -- lua_sethook is bound to the lua_State it was called on.
-         -- Coroutines run on their OWN lua_State (the `co` thread),
-         -- which means the hook installed by pchook.start() on the
-         -- main state may NOT propagate to coroutines unless Lua
-         -- explicitly forwards it. We pin down whichever behavior the
-         -- current implementation exhibits so a future change cannot
-         -- silently invalidate downstream coverage reports.
+         -- start() attaches existing threads; Lua copies the creator's
+         -- hook onto new threads. Both paths must contribute real hits.
 
          it("records hits inside coroutine bodies created after start", function()
             -- On supported PUC-Rio Lua versions, a coroutine created

@@ -405,6 +405,30 @@ static int l_get_all_hits(lua_State *L);
 static void aggregate_all_hits(lua_State *L, int result_idx);
 static void aggregate_all_line_hits(lua_State *L, int result_idx);
 
+/*
+ * Install/remove the hook on every existing thread, including coroutine.wrap
+ * threads hidden in C closures and threads resumed through cached/C APIs.
+ * New threads inherit the hook from their creator (lua_newthread).
+ *
+ * This pass only reads the GC list and calls lua_gethook/lua_sethook, which
+ * do not allocate or run Lua/GC. Never keep these raw pointers after the pass.
+ * In particular, do not retain threads and prevent their normal collection.
+ */
+static void set_thread_hooks(lua_State *L, int mask) {
+    GCObject *object;
+    for (object = L->l_G->allgc; object != NULL; object = object->next) {
+        if (object->tt == LUA_VTHREAD) {
+            lua_State *thread = (lua_State *)object;
+            if (mask != 0) {
+                lua_sethook(thread, pc_hook, mask, 1);
+            } else if (lua_gethook(thread) == pc_hook) {
+                /* Leave hooks installed by somebody else after start alone. */
+                lua_sethook(thread, NULL, 0, 0);
+            }
+        }
+    }
+}
+
 static int l_start(lua_State *L) {
     int mask;
 
@@ -479,18 +503,18 @@ static int l_start(lua_State *L) {
         lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
     }
 
-    lua_sethook(L, pc_hook, mask, 1);
     lua_pushboolean(L, 1);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
+    set_thread_hooks(L, mask);
     return 0;
 }
 
 static int l_stop(lua_State *L) {
     int result_idx;
 
-    /* Drop the hook first so no further pc_hook callback can fire. After
-       this, PCHOOK entries are guaranteed to be immutable. */
-    lua_sethook(L, NULL, 0, 0);
+    /* Stop all threads before caching snapshots: a suspended coroutine
+       resumed after stop must not mutate the underlying hit tables. */
+    set_thread_hooks(L, 0);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
 
