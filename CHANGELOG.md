@@ -13,6 +13,9 @@
 
 ### Bug fixes
 
+- `cluacov.pchook`: validate allocator, registry, and GC-list head layout at
+  module load and reject detected mismatches before traversing threads.
+
 - `cluacov.pchook`: collect execution in coroutines created or suspended
   before `start()`, including existing `coroutine.wrap` closures and their
   child coroutines. Stop collection on all threads before caching reports,
@@ -39,6 +42,9 @@
   post-mortem.
 
 ### Documentation
+
+- Clarify that `pchook.start()` overwrites existing debug hooks and `stop()`
+  does not restore them; concurrent hook-based tools can cause missed coverage.
 
 - Expanded the branch-coverage guide, benchmark documentation, and
   contributor-facing repository guidance.
