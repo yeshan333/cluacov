@@ -13,6 +13,10 @@
 
 ### Bug fixes
 
+- `cluacov.pchook`: collect execution in coroutines created or suspended
+  before `start()`, including existing `coroutine.wrap` closures and their
+  child coroutines. Stop collection on all threads before caching reports,
+  so resuming a coroutine after `stop()` cannot change recorded hits.
 - `cluacov.pchook`: avoid a shutdown-time segmentation fault by
   materializing `Proto` metadata into Lua tables instead of keeping
   raw C pointers alive into `__gc` finalization paths.
