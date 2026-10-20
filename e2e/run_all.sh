@@ -47,6 +47,7 @@ scripts=(
    "e2e_runner_shutdown.lua"
    "e2e_tick_mode.lua"
    "e2e_coroutine.lua"
+   "e2e_coroutine_runner.lua"
    "e2e_multi_source.lua"
 )
 
