@@ -63,7 +63,8 @@ else
    result.start()
    assert(select(2, coroutine.resume(co)) == 42)
    result.stop()
-   assert(next(result.get_line_hits(body)), "matching layout did not collect coroutine hits")
+   local line = debug.getinfo(body, "S").linedefined
+   assert((result.get_line_hits(body)[line] or 0) > 0, "matching layout did not collect coroutine hits")
    assert(debug.gethook(co) == nil)
 end
 debug.sethook(co)
