@@ -112,7 +112,7 @@ Re-run any of the `mise run e2e:54` / `e2e:55` / `test:54` / `test:55`
 tasks to overwrite the local tree with non-instrumented builds.
 
 CI: `.github/workflows/asan.yml` runs the equivalent of `mise run asan:55`
-on every push/PR (canary + sanitized build + busted + e2e on Lua 5.5).
+on every push/PR (canary + sanitized build + busted + coverage contracts + e2e on Lua 5.5 and LuaJIT).
 This is the regression guard against memory-safety bugs in the C
 extensions. If you change ASan flags / options / suppressions in
 `mise.toml`, mirror the change in that workflow.

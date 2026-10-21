@@ -437,6 +437,8 @@ Run `luajit -lcluacov.runner script.lua`, or use the same `pchook` and
 expressions, numeric loop entry/backedges, generic iterators (including the
 specialized `pairs`/`next` bytecode), and non-tail `assert` calls are supported.
 A PC identifies a 1-based executable bytecode slot, excluding the function header.
+Empty conditionals whose outcomes compile to the same successor are omitted:
+there are no two distinct control-flow edges to count.
 
 `start()` flushes compiled traces and pauses the JIT engine, so code warmed up
 before collection cannot bypass the instruction hook. `stop()` restores the
@@ -453,7 +455,11 @@ tool after start, but coverage after that replacement is incomplete.
 LuaJIT forbids switching JIT modes inside `__gc`. When `stop()` runs in a
 finalizer, it still freezes statistics and the runner writes the final report;
 JIT restoration is deferred until an ordinary `stop()` call, if the process
-continues. This also covers short tick-mode programs that exit before saving.
+continues (a new `start()` also completes deferred restoration). This also
+covers short tick-mode programs that exit before saving. Separately, LuaJIT
+suppresses debug hooks while executing `__gc` and its callees: their instructions
+and calls do not contribute to coverage, even though the finalizer runs. This
+VM limitation applies to ordinary finalizers, not just the report writer.
 
 The LuaJIT adapter uses the existing vendored 2.1 object layouts, with bytecode
 and frame headers from upstream commit `7152e15489d2077cd299ee23e3d51a4c599ab14f`
