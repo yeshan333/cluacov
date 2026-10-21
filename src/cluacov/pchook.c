@@ -6,8 +6,9 @@
 #define PUCRIOLUA
 #endif
 
-#if defined(PUCRIOLUA) && LUA_VERSION_NUM >= 504
+#if !defined(PUCRIOLUA) || LUA_VERSION_NUM >= 504
 
+#ifdef PUCRIOLUA
 #if LUA_VERSION_NUM == 504
 #include "lua54/lobject.h"
 #include "lua54/lstate_min.h"
@@ -19,11 +20,39 @@
 #endif
 
 #include "protoinfo.h"
+#define proto_code_count(p) ((p)->sizecode)
+#define proto_firstline(p) ((p)->linedefined)
+#define proto_child_slots(p) ((p)->sizep)
+#define proto_child(prototype, i) ((prototype)->p[i])
+#else
+#include "ljproto.h"
+#define lua_rawlen lua_objlen
+
+static void lua_rawgetp(lua_State *L, int idx, const void *key) {
+    if (idx < 0 && idx > LUA_REGISTRYINDEX) idx = lua_gettop(L) + idx + 1;
+    lua_pushlightuserdata(L, (void *)key);
+    lua_rawget(L, idx);
+}
+
+static void lua_rawsetp(lua_State *L, int idx, const void *key) {
+    if (idx < 0 && idx > LUA_REGISTRYINDEX) idx = lua_gettop(L) + idx + 1;
+    lua_pushlightuserdata(L, (void *)key);
+    lua_insert(L, -2);
+    lua_rawset(L, idx);
+}
+static char JIT_RESTORE_KEY;
+#endif
 
 /* Materialized entries contain only Lua data. The private weak-key index
  * uses collectable Proto values, not lightuserdata addresses: GC removes a
  * dead Proto's mapping before its address can be reused. It survives stop /
  * start and does not retain closures, upvalues, or coroutines. */
+#ifdef PUCRIOLUA
+#define CLUACOV_TAILCALL LUA_HOOKTAILCALL
+#else
+/* LuaJIT emits ordinary call hooks for tail calls, never LUA_HOOKTAILRET. */
+#define CLUACOV_TAILCALL (-1)
+#endif
 static char PCHOOK_KEY;
 static char PROTO_INDEX_KEY;
 static char FRAMES_KEY;
@@ -41,6 +70,7 @@ static char HOOK_ACTIVE_KEY;
  * This is a sanity check, not an ABI sandbox: reading l_G itself still assumes
  * the stock lua_State prefix. Custom Lua builds must use matching headers.
  */
+#ifdef PUCRIOLUA
 static void check_state_layout(lua_State *L) {
     void *ud;
     lua_Alloc alloc = lua_getallocf(L, &ud);
@@ -98,15 +128,25 @@ static int luaG_getfuncline(const Proto *f, int pc) {
 }
 
 static int get_pc_line(const Proto *proto, int pc) {
-    if (pc < 0 || pc >= proto->sizecode) {
+    if (pc < 0 || pc >= proto_code_count(proto)) {
         return 0;
     }
     return luaG_getfuncline(proto, pc);
 }
 
+#else
+static Proto *get_proto(lua_State *L, int idx) {
+    return funcproto((GCfunc *)lua_topointer(L, idx));
+}
+#endif
+
 static const char *get_source_name(const Proto *proto) {
+#ifdef PUCRIOLUA
     if (proto->source == NULL) return NULL;
     return getstr(proto->source);
+#else
+    return proto_lineinfo(proto) ? proto_chunknamestr(proto) : NULL;
+#endif
 }
 
 static const char *normalize_source_name(const Proto *proto) {
@@ -120,7 +160,11 @@ static const char *normalize_source_name(const Proto *proto) {
  * write barrier, and weak keys avoid retaining any executable object. */
 static void push_proto_key(lua_State *L, const Proto *proto) {
     lua_pushnil(L);
+#ifdef PUCRIOLUA
     setgcovalue(L, s2v(L->top.p - 1), (GCObject *)proto);
+#else
+    setprotoV(L, L->top - 1, (Proto *)proto);
+#endif
 }
 
 static void new_weak_keys(lua_State *L, void *key) {
@@ -156,8 +200,8 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto,
     lua_setfield(L, -2, "proto_id");
     lua_pushstring(L, normalize_source_name(proto));
     lua_setfield(L, -2, "source");
-    lua_createtable(L, proto->sizecode, 0);
-    for (pc = 0; pc < proto->sizecode; pc++) {
+    lua_createtable(L, proto_code_count(proto), 0);
+    for (pc = 0; pc < proto_code_count(proto); pc++) {
         int line = get_pc_line(proto, pc);
         if (line > 0) {
             lua_pushinteger(L, line);
@@ -201,13 +245,14 @@ static lua_Integer register_proto(lua_State *L, const Proto *proto,
         lua_pop(L, 1);
     }
     lua_pop(L, 1);
-    for (i = 0; i < proto->sizep; i++) {
+    for (i = 0; i < proto_child_slots(proto); i++) {
+        if (proto_child(proto, i) == NULL) continue;
         if (path != NULL) {
             const char *child = lua_pushfstring(L, "%s.%d", path, i + 1);
-            register_proto(L, proto->p[i], child);
+            register_proto(L, proto_child(proto, i), child);
             lua_pop(L, 1);
         } else {
-            register_proto(L, proto->p[i], NULL);
+            register_proto(L, proto_child(proto, i), NULL);
         }
     }
     return id;
@@ -216,7 +261,7 @@ static lua_Integer register_proto(lua_State *L, const Proto *proto,
 static void push_entry(lua_State *L, const Proto *proto) {
     lua_Integer id = find_entry_id_for_proto(L, proto);
     if (id == 0) {
-        id = register_proto(L, proto, proto->linedefined == 0 ? "0" : NULL);
+        id = register_proto(L, proto, proto_firstline(proto) == 0 ? "0" : NULL);
     }
     lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
     lua_rawgeti(L, -1, id);
@@ -249,7 +294,7 @@ static void push_frames(lua_State *L) {
     lua_remove(L, -2);
 }
 
-static void record_transition(lua_State *L, int entry, CallInfo *ci, int pc) {
+static void record_transition(lua_State *L, int entry, const void *ci, int pc) {
     int previous;
     push_frames(L);
     lua_rawgetp(L, -1, ci);
@@ -307,13 +352,35 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
 
     {
         Proto *proto;
+#ifdef PUCRIOLUA
         CallInfo *ci = (CallInfo *)ar->i_ci;
+#else
+        /* Stack offsets survive stack reallocations; raw stack pointers do not. */
+        const void *ci = (const void *)(uintptr_t)(unsigned int)ar->i_ci;
+#endif
         int entry, pc;
         lua_Integer count;
 
         if (ar->event == LUA_HOOKRET || ar->event == LUA_HOOKCALL ||
-            ar->event == LUA_HOOKTAILCALL) {
+            ar->event == CLUACOV_TAILCALL) {
             push_frames(L);
+#ifndef PUCRIOLUA
+            /* FUNCV relocates vararg frames after the call event. Clear
+             * abandoned deeper offsets too: an error has no return event,
+             * and a later call can reuse its relocated stack slots. */
+            if (ar->event == LUA_HOOKCALL) {
+                lua_pushnil(L);
+                while (lua_next(L, -2) != 0) {
+                    uintptr_t frame = (uintptr_t)lua_touserdata(L, -2);
+                    lua_pop(L, 1);
+                    if (frame >= (uintptr_t)ci) {
+                        lua_pushvalue(L, -1);
+                        lua_pushnil(L);
+                        lua_rawset(L, -4);
+                    }
+                }
+            }
+#endif
             lua_pushnil(L);
             lua_rawsetp(L, -2, ci);
             lua_pop(L, 1);
@@ -328,10 +395,18 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
         proto = get_proto(L, -1);
         push_entry(L, proto);
         entry = lua_gettop(L);
-        if (ar->event == LUA_HOOKCALL || ar->event == LUA_HOOKTAILCALL) {
+        if (ar->event == LUA_HOOKCALL || ar->event == CLUACOV_TAILCALL) {
             increment_field(L, entry, "calls");
         } else {
+#ifdef PUCRIOLUA
             pc = (int)(ci->u.l.savedpc - proto->code);
+#else
+            pc = (int)(cframe_Lpc(L) - proto_bc(proto)) - 1;
+            if (pc < 1 || pc > proto_code_count(proto)) {
+                lua_pop(L, 2);
+                return;
+            }
+#endif
             record_transition(L, entry, ci, pc);
             lua_getfield(L, entry, "hits");
             lua_rawgeti(L, -1, pc);
@@ -356,6 +431,7 @@ static void aggregate_all_line_hits(lua_State *L, int result_idx);
  * finalizer, so there such a main thread is hooked only when it calls start.
  * Lua 5.5 runs finalizers normally and keeps the hook.
  */
+#ifdef PUCRIOLUA
 static int skip_main_thread(lua_State *L, lua_State *thread) {
 #if LUA_VERSION_NUM == 504
     lua_State *main_thread;
@@ -398,6 +474,49 @@ static void set_thread_hooks(lua_State *L, int mask) {
         }
     }
 }
+
+#else
+/* LuaJIT hooks belong to the VM, including all existing and future threads. */
+static void set_thread_hooks(lua_State *L, int mask) {
+    if (mask) lua_sethook(L, pc_hook, mask, 1);
+    else if (lua_gethook(L) == pc_hook) lua_sethook(L, NULL, 0, 0);
+}
+
+static void suspend_jit(lua_State *L) {
+    /* Query through the supported jit API; avoid depending on jit_State ABI. */
+    lua_getglobal(L, "require");
+    lua_pushliteral(L, "jit");
+    lua_call(L, 1, 1);
+    lua_getfield(L, -1, "status");
+    lua_call(L, 0, 1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &JIT_RESTORE_KEY);
+    lua_pop(L, 1);
+    luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF);
+    luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH);
+}
+
+static int resume_jit(lua_State *L) {
+    luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_ON);
+    return 0;
+}
+
+static void restore_jit(lua_State *L) {
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &JIT_RESTORE_KEY);
+    if (lua_toboolean(L, -1)) {
+        /* LuaJIT forbids setmode inside __gc. A final report must still be
+         * written at lua_close. Defer restoration until a later ordinary
+         * stop(), if this is a user finalizer rather than process shutdown. */
+        lua_pushcfunction(L, resume_jit);
+        if (lua_pcall(L, 0, 0, 0) != 0) {
+            lua_pop(L, 2);
+            return;
+        }
+    }
+    lua_pop(L, 1);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &JIT_RESTORE_KEY);
+}
+#endif
 
 static int l_start(lua_State *L) {
     int mask;
@@ -470,6 +589,10 @@ static int l_start(lua_State *L) {
         lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
     }
 
+#ifndef PUCRIOLUA
+    restore_jit(L);  /* Complete any restoration deferred by a finalizer. */
+    suspend_jit(L);
+#endif
     lua_pushboolean(L, 1);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
     set_thread_hooks(L, mask);
@@ -482,6 +605,9 @@ static int l_stop(lua_State *L) {
     /* Stop all threads before caching snapshots: a suspended coroutine
        resumed after stop must not mutate the underlying hit tables. */
     set_thread_hooks(L, 0);
+#ifndef PUCRIOLUA
+    restore_jit(L);
+#endif
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
 
@@ -808,8 +934,9 @@ static void collect_proto_hits_recursive(
         lua_setfield(L, record, "calls");
     }
     lua_rawseti(L, result_idx, ++(*count));
-    for (i = 0; i < proto->sizep; i++) {
-        collect_proto_hits_recursive(L, proto->p[i], result_idx, count);
+    for (i = 0; i < proto_child_slots(proto); i++) {
+        if (proto_child(proto, i) == NULL) continue;
+        collect_proto_hits_recursive(L, proto_child(proto, i), result_idx, count);
     }
 }
 
@@ -840,7 +967,7 @@ static void collect_line_hits_recursive(
     int pc, line, max_line;
     int i;
 
-    for (pc = 0; pc < proto->sizecode; pc++) {
+    for (pc = 0; pc < proto_code_count(proto); pc++) {
         line = get_pc_line(proto, pc);
         if (line <= 0) continue;
 
@@ -916,8 +1043,9 @@ static void collect_line_hits_recursive(
         lua_pop(L, 3);  /* hits, entry, PCHOOK_KEY */
     }
 
-    for (i = 0; i < proto->sizep; i++) {
-        collect_line_hits_recursive(L, proto->p[i], result_idx);
+    for (i = 0; i < proto_child_slots(proto); i++) {
+        if (proto_child(proto, i) == NULL) continue;
+        collect_line_hits_recursive(L, proto_child(proto, i), result_idx);
     }
 }
 
@@ -954,14 +1082,15 @@ static void collect_func_defs_recursive(
 ) {
     int i;
     luaL_checkstack(L, 12, "cluacov prototype nesting too deep");
-    if (proto->linedefined > 0) {
+    if (proto_firstline(proto) > 0) {
         lua_createtable(L, 0, 6);
         set_proto_metadata(L, proto, path);
         lua_rawseti(L, result_idx, ++(*count));
     }
-    for (i = 0; i < proto->sizep; i++) {
+    for (i = 0; i < proto_child_slots(proto); i++) {
+        if (proto_child(proto, i) == NULL) continue;
         const char *child = lua_pushfstring(L, "%s.%d", path, i + 1);
-        collect_func_defs_recursive(L, proto->p[i], result_idx, count, child);
+        collect_func_defs_recursive(L, proto_child(proto, i), result_idx, count, child);
         lua_pop(L, 1);
     }
 }
@@ -984,10 +1113,10 @@ static int l_get_func_defs(lua_State *L) {
     return 1;
 }
 
-#else /* Lua < 5.4 or LuaJIT */
+#else /* PUC-Rio Lua < 5.4 */
 
 static int l_start(lua_State *L) {
-    return luaL_error(L, "pchook requires PUC-Rio Lua 5.4 or later");
+    return luaL_error(L, "pchook requires PUC-Rio Lua 5.4+ or LuaJIT 2.1");
 }
 
 static int l_stop(lua_State *L) {
