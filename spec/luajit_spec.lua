@@ -86,6 +86,33 @@ describe("LuaJIT branch coverage", function()
       assert.equal("partial", branch(func, "test").status)
    end)
 
+   for _, mode in ipairs({ "removed", "replaced" }) do
+      it("collects branches and restores JIT after the global require is " .. mode, function()
+         local func = compile("return function(x) if x then return 1 end return 2 end")
+         local original_require = _G.require
+         local replacement_called = false
+         local collecting_jit, result
+         jit.on()
+         local ok, err = pcall(function()
+            _G.require = mode == "replaced" and function()
+               replacement_called = true
+               error("application loader must not be called")
+            end or nil
+            pchook.start()
+            collecting_jit = jit.status()
+            result = func(true)
+            pchook.stop()
+         end)
+         _G.require = original_require
+         assert.is_true(ok, tostring(err))
+         assert.is_false(replacement_called)
+         assert.is_false(collecting_jit)
+         assert.equal(1, result)
+         assert.is_true(jit.status())
+         assert.equal("partial", branch(func, "test").status)
+      end)
+   end
+
    it("counts every iteration of a loop compiled before collection starts", function()
       jit.on()
       jit.flush()

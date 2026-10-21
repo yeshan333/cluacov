@@ -41,6 +41,7 @@ static void lua_rawsetp(lua_State *L, int idx, const void *key) {
     lua_rawset(L, idx);
 }
 static char JIT_RESTORE_KEY;
+static char JIT_STATUS_KEY;
 #endif
 
 /* Materialized entries contain only Lua data. The private weak-key index
@@ -482,15 +483,23 @@ static void set_thread_hooks(lua_State *L, int mask) {
     else if (lua_gethook(L) == pc_hook) lua_sethook(L, NULL, 0, 0);
 }
 
-static void suspend_jit(lua_State *L) {
-    /* Query through the supported jit API; avoid depending on jit_State ABI. */
-    lua_getglobal(L, "require");
-    lua_pushliteral(L, "jit");
-    lua_call(L, 1, 1);
+static void cache_jit_status(lua_State *L) {
+    /* Cache the supported API before applications sandbox their globals. */
+    lua_getfield(L, LUA_REGISTRYINDEX, "_LOADED");
+    if (!lua_istable(L, -1)) luaL_error(L, "pchook requires the jit library");
+    lua_getfield(L, -1, "jit");
+    if (!lua_istable(L, -1)) luaL_error(L, "pchook requires the jit library");
     lua_getfield(L, -1, "status");
+    if (!lua_isfunction(L, -1)) luaL_error(L, "pchook requires jit.status");
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &JIT_STATUS_KEY);
+    lua_pop(L, 2);
+}
+
+static void suspend_jit(lua_State *L) {
+    /* Avoid depending on either mutable globals or the jit_State ABI. */
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &JIT_STATUS_KEY);
     lua_call(L, 0, 1);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &JIT_RESTORE_KEY);
-    lua_pop(L, 1);
     luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF);
     luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_FLUSH);
 }
@@ -1162,6 +1171,8 @@ static int l_get_func_defs(lua_State *L) {
 int luaopen_cluacov_pchook(lua_State *L) {
 #if defined(PUCRIOLUA) && LUA_VERSION_NUM >= 504
     check_state_layout(L);
+#elif !defined(PUCRIOLUA)
+    cache_jit_status(L);
 #endif
     lua_newtable(L);
 
