@@ -8,7 +8,10 @@ static void lj_add_branch(lua_State *L, Proto *p, const char *path,
                           int first, int second, int alternate) {
     int line = get_pc_line(p, pc - 1), i;
     int targets[2];
-    if (line <= 0 || first >= (int)p->sizebc || second >= (int)p->sizebc)
+    /* An empty conditional may have both outcomes folded to the same PC.
+     * There is no distinct control-flow edge to measure in that bytecode. */
+    if (line <= 0 || first == second ||
+        first >= (int)p->sizebc || second >= (int)p->sizebc)
         return;
     targets[0] = first < second ? first : second;
     targets[1] = first < second ? second : first;

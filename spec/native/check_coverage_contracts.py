@@ -128,6 +128,14 @@ return M
 
 RUNNER_CASES = [
     (
+        "preloaded_table_literal_functions",
+        "LCOV distinguishes preloaded same-line functions with different table literals",
+        "local M={}; function M.first(x) local t={value=1, [true]='yes', 10, 20}; if x then return t.value end end; function M.second(x) local t={value=2, [true]='yes', 10, 20}; if x then return t.value end end; return M\n",
+        "local m=require('sample'); require('cluacov.runner'); assert(m.first(true)==1)",
+        "",
+        "FNDA:1,first\nFNDA:0,second\nFNH:1\n",
+    ),
+    (
         "ambiguous_preloaded_functions",
         "LCOV warns rather than assigning preloaded identical functions to arbitrary declarations",
         "local M={}; function M.first(x) if x then return 1 else return 2 end end; function M.second(x) if x then return 1 else return 2 end end; return M\n",

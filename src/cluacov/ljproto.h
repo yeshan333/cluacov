@@ -3,6 +3,7 @@
 #ifndef CLUACOV_LJPROTO_H
 #define CLUACOV_LJPROTO_H
 
+#include <stdlib.h>
 #include "luajit.h"
 #if LUAJIT_VERSION_NUM == 20199
 #include "lj2/lua_assert.h"
@@ -60,6 +61,63 @@ static BCIns canonical_instruction(BCIns ins) {
     return (ins & ~255u) | op;
 }
 
+/* TDUP constants are literal table templates. Their hash node order is not
+ * part of the source, so sort keys before serializing the primitive entries. */
+static int compare_template_keys(const void *left, const void *right) {
+    const TValue *a = &(*(const Node *const *)left)->key;
+    const TValue *b = &(*(const Node *const *)right)->key;
+    if (itype(a) != itype(b)) return itype(a) < itype(b) ? -1 : 1;
+    if (tvisstr(a)) {
+        const GCstr *sa = strV(a), *sb = strV(b);
+        size_t n = sa->len < sb->len ? sa->len : sb->len;
+        int order = memcmp(strdata(sa), strdata(sb), n);
+        return order ? order : (sa->len > sb->len) - (sa->len < sb->len);
+    }
+    if (tvisnumber(a)) {
+        lua_Number na = numberVnum(a), nb = numberVnum(b);
+        return (na > nb) - (na < nb);
+    }
+    return 0;  /* A primitive boolean key is identified by its tag. */
+}
+
+static void add_template_value(luaL_Buffer *buffer, const TValue *value) {
+    luaL_addchar(buffer, (char)itype(value));
+    if (tvisstr(value)) {
+        const GCstr *str = strV(value);
+        luaL_addlstring(buffer, (const char *)&str->len, sizeof(str->len));
+        luaL_addlstring(buffer, strdata(str), str->len);
+    } else if (tvisnumber(value)) {
+        lua_Number n = numberVnum(value);
+        luaL_addlstring(buffer, (const char *)&n, sizeof(n));
+    }
+}
+
+static void push_template_signature(lua_State *L, const GCtab *table) {
+    luaL_Buffer buffer;
+    uint32_t i, count = 0;
+    int storage = lua_gettop(L) + 1;
+    /* Lua owns this temporary workspace, including on allocation errors.
+     * The caller's live prototype roots every key and value while sorting. */
+    const Node **nodes = (const Node **)lua_newuserdata(L,
+        ((size_t)table->hmask + 1) * sizeof(Node *));
+    for (i = 0; i <= table->hmask; i++) {
+        const Node *node = noderef(table->node) + i;
+        if (!tvisnil(&node->val)) nodes[count++] = node;
+    }
+    qsort(nodes, count, sizeof(Node *), compare_template_keys);
+    luaL_buffinit(L, &buffer);
+    luaL_addlstring(&buffer, (const char *)&table->asize, sizeof(table->asize));
+    for (i = 0; i < table->asize; i++)
+        add_template_value(&buffer, &tvref(table->array)[i]);
+    luaL_addlstring(&buffer, (const char *)&count, sizeof(count));
+    for (i = 0; i < count; i++) {
+        add_template_value(&buffer, &nodes[i]->key);
+        add_template_value(&buffer, &nodes[i]->val);
+    }
+    luaL_pushresult(&buffer);
+    lua_remove(L, storage);
+}
+
 static void push_proto_signature(lua_State *L, const Proto *p) {
     luaL_Buffer buffer;
     int i;
@@ -80,6 +138,25 @@ static void push_proto_signature(lua_State *L, const Proto *p) {
             GCstr *str = &gc->str;
             luaL_addlstring(&buffer, (const char *)&str->len, sizeof(str->len));
             luaL_addlstring(&buffer, strdata(str), str->len);
+        } else if (gc->gch.gct == (uint8_t)~LJ_TTAB) {
+            push_template_signature(L, &gc->tab);
+            luaL_addvalue(&buffer);
+        } else if (gc->gch.gct == (uint8_t)~LJ_TCDATA) {
+            /* LuaJIT bytecode permits only int64, uint64, and complex double
+             * cdata literals (lj_bcwrite.c). These predefined CType IDs are
+             * 11/12 for integers. Complex double is 16 in beta3/older 2.1,
+             * or 18 after INT128/UINT128 were added to lj_ctype.h CTTYDEF.
+             * No other cdata type can occur in a stock bytecode constant. */
+            const GCcdata *cd = &gc->cd;
+            size_t size;
+            if (cd->ctypeid == 11 || cd->ctypeid == 12) size = 8;
+            else if (cd->ctypeid == 16 || cd->ctypeid == 18) size = 16;
+            else {
+                luaL_error(L, "cluacov: unsupported LuaJIT cdata constant type");
+                return;
+            }
+            luaL_addlstring(&buffer, (const char *)&cd->ctypeid, sizeof(cd->ctypeid));
+            luaL_addlstring(&buffer, (const char *)cdataptr(cd), size);
         }
     }
     luaL_pushresult(&buffer);

@@ -33,6 +33,59 @@ describe("LuaJIT branch coverage", function()
       return { site.targets[1].hits, site.targets[2].hits }
    end
 
+   it("distinguishes literal table values while matching separately loaded copies", function()
+      local source = "return function() local t={value=1, [true]='yes', 10, 20}; return t end, "
+         .. "function() local t={value=2, [true]='yes', 10, 20}; return t end"
+      local first, second = compile(source)
+      local copy = compile(source)
+      local a = pchook.get_hits(first)[1].signature
+      local b = pchook.get_hits(second)[1].signature
+      assert.not_equal(a, b)
+      assert.equal(a, pchook.get_hits(copy)[1].signature)
+   end)
+
+   it("omits an empty conditional whose two outcomes compile to the same successor", function()
+      local func = compile("return function(x) if x then end return 1 end")
+      pchook.start()
+      assert.equal(1, func(true))
+      pchook.stop()
+      assert.same({}, deepbranches.get(func))
+      assert.equal(0, branchcov.analyze(func).total)
+   end)
+
+   if pcall(require, "ffi") then
+      for _, suffix in ipairs({ "LL", "ULL", "i" }) do
+         it("distinguishes " .. suffix .. " literal values when matching separately loaded functions", function()
+            local template = "return function(x) local n=%s; if x then return n end end"
+            local first = compile(template:format("1" .. suffix))
+            local second = compile(template:format("2" .. suffix))
+            local copy = compile(template:format("1" .. suffix))
+            local signature = pchook.get_hits(first)[1].signature
+            assert.not_equal(signature, pchook.get_hits(second)[1].signature)
+            assert.equal(signature, pchook.get_hits(copy)[1].signature)
+         end)
+      end
+   end
+
+   it("keeps ordinary-call counts unchanged when LuaJIT suppresses hooks inside a finalizer", function()
+      local runs = 0
+      local func = compile("return function(x) if x then return 1 end return 2 end")
+      pchook.start()
+      assert.equal(1, func(true))
+      do
+         local anchor = newproxy(true)
+         getmetatable(anchor).__gc = function()
+            runs = runs + func(false)
+         end
+      end
+      collectgarbage("collect")
+      collectgarbage("collect")
+      pchook.stop()
+      assert.equal(2, runs, "the finalizer must actually run")
+      assert.equal(1, pchook.get_hits(func)[1].calls)
+      assert.equal("partial", branch(func, "test").status)
+   end)
+
    it("counts every iteration of a loop compiled before collection starts", function()
       jit.on()
       jit.flush()
