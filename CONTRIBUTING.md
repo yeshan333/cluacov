@@ -81,7 +81,7 @@ mise run asan:all   # both 5.4 and 5.5
 ```
 
 What runs:
-1. `spec/asan_lsan_canary.sh` — a 64-byte deliberate-leak canary that
+1. `spec/asan/asan_lsan_canary.sh` — a 64-byte deliberate-leak canary that
    asserts LSan is actually live in this environment (a clean cluacov
    run with broken LSan would be a silent false negative).
 2. `luarocks make ... --tree=.` — rebuild C extensions with sanitizer
@@ -91,7 +91,7 @@ What runs:
 
 Subprocess noise: `LD_PRELOAD` propagates to children spawned via
 `io.popen` / `os.execute` (gcc, bash, sort). Their own at-exit leaks
-are filtered by `spec/asan_lsan_suppressions.txt`, which uses path-
+are filtered by `spec/asan/asan_lsan_suppressions.txt`, which uses path-
 and frame-based patterns that never match cluacov code.
 
 Platform: requires Linux + gcc (the rules use `gcc -print-file-name=libasan.so`

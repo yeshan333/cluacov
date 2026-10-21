@@ -17,7 +17,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--lua", default="lua")
 parser.add_argument("--include", required=True)
 args = parser.parse_args()
-root = Path(__file__).resolve().parent.parent
+root = Path(__file__).resolve().parents[2]
 version = subprocess.check_output(
     [args.lua, "-e", "io.write(_VERSION)"], text=True
 ).strip()
