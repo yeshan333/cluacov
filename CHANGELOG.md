@@ -13,6 +13,10 @@
 
 ### Bug fixes
 
+- `cluacov.pchook`: `start()` called from a coroutine no longer hooks a
+  main thread driven by `lua_resume` (for example under ltask). When the
+  state was closed while that thread was suspended, Lua 5.4 aborted every
+  `__gc` finalizer, so the runner never wrote its stats or LCOV report.
 - `cluacov.pchook`: validate allocator, registry, and GC-list head layout at
   module load and reject detected mismatches before traversing threads.
 
