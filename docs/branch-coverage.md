@@ -465,3 +465,15 @@ The LuaJIT adapter uses the existing vendored 2.1 object layouts, with bytecode
 and frame headers from upstream commit `7152e15489d2077cd299ee23e3d51a4c599ab14f`
 (rolling 2.1) and `8271c643c21d1b2f344e339f559f2de6f3663191` (2.1.0-beta3).
 Custom LuaJIT forks with incompatible object/frame layouts need matching headers.
+The native modules check the bytecode header's frame-mode flag through the
+public API before reading VM internals, and reject mismatched GC64 builds.
+Compile cluacov with the same GC64 flags as LuaJIT. This check does not validate
+every layout change in a custom fork.
+
+Embedded hosts can load the modules without opening the `jit` library, but
+`pchook.start()` requires it to preserve the engine's initial state. Opening
+the library later allows the same module to start. Starting collection inside
+`__gc` is rejected before modifying existing coverage data. Analyzing a traced
+function inside `__gc` is also rejected explicitly, because LuaJIT cannot flush
+its traces there; analyze it before finalization. Fresh, untraced functions
+remain analyzable during final report generation.
