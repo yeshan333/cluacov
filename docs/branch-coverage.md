@@ -289,9 +289,11 @@ local hits = pchook.get_hits(func) -- per-proto PC hit tables
 pchook.reset()                     -- clear all recorded data (collection continues)
 ```
 
-`pchook.start()` calls `lua_sethook(L, hook, LUA_MASKCOUNT, 1)` to fire a
-C-level callback on every VM instruction. The callback records the 1-based
-program counter of each executed instruction, keyed by `Proto*` pointer.
+`pchook.start()` installs count=1, call, and return hooks. The collector records
+1-based PCs, call counts, and transitions between PCs within each invocation.
+A GC-managed weak Proto index distinguishes independent same-line functions
+without retaining closures or their captured values. It also handles stripped
+bytecode without creating a new record for every instruction.
 Calling `start()` again while the hook is already active is a no-op. Calling
 `stop()` and then `start()` resumes the same accumulated dataset; use
 `reset()` when you want a fresh collection.
@@ -345,14 +347,24 @@ functions) and returns an array of entries:
 }
 ```
 
-Each entry's `hits` table maps 1-based PC to execution count.
+Each entry's `hits` table maps 1-based PC to execution count. `calls` counts
+observed Lua call/tail-call events, independently of loops at the function entry.
+A function already running when collection starts can have instruction hits
+without a new call event. `edges[from_pc][to_pc]` counts transitions within a
+single invocation. Transitions are kept separately for each coroutine and frame,
+and cleared across stop/start or reset boundaries.
 
-> **Performance note:** instruction-level hooks fire on every VM instruction.
-> Despite the higher event rate, per-call cost is lower than the cluacov C line
-> hook (no `lua_getstack` call) — overall overhead is comparable and often lower
-> (see [benchmark](../docs/benchmark.md)). Both modes add significant overhead
-> vs a no-hook baseline; use `pchook` for coverage analysis, not production
-> monitoring.
+`proto_id` is an opaque live identity for joining `get_hits` with `deepbranches`;
+do not persist it. `proto_path` identifies lexical children of an observed chunk,
+and `signature` describes its bytecode for matching reports to a reloaded file.
+Global snapshots contain materialized metadata, counts, and paths, not live Proto
+references. A stripped function has no source line attribution but retains its
+PC and call counts.
+
+> **Performance note:** count hooks, call hooks, and transition tables add
+> runtime and memory overhead. Earlier [benchmarks](../docs/benchmark.md) predate
+> edge tracking; measure your workload before relying on those comparisons.
+> Use this collector for coverage analysis.
 
 ### `cluacov.branchcov` API
 
@@ -366,19 +378,44 @@ local result = branchcov.analyze(func)
 ```
 
 `analyze` combines `deepbranches.get(func)` with `pchook.get_hits(func)` to
-compute per-instruction branch coverage. Each branch's targets have independent
-`hits` counts from the PC-level data.
+compute branch-edge coverage. Each target's `hits` counts observed transitions
+from that branch, not the total number of times its destination PC executed.
 
 Unlike the line-hit approach, **no filtering is needed** — every branch
 instruction is individually measurable.
 
 ### Shared target PCs
 
-Multiple branch instructions may share a target PC (e.g., all `TEST`s in
-`a or b or c` target the same body instruction). When the body is reached
-from any path, that target PC shows as "hit" for **all** branches sharing it.
-This is instruction-coverage (was this PC executed?), not edge-coverage
-(which branch led here?).
+Multiple branches may share a destination PC. The collector records the source
+and destination in the same invocation, so reaching a merge point through a
+true arm, a `goto`, or another short-circuit operand does not cover other edges.
+Skipped branch instructions remain uncovered. Generic iterator edges include
+the first iteration fused into `TFORPREP` by Lua 5.4/5.5.
+
+For the built-in `assert`, the failure count is the number of observed calls
+minus their successful continuations. Static assert discovery still recognizes
+names, not runtime callee identity; replacing `assert` with a yielding/custom
+function is outside that failure-count contract.
+
+### Runner reports and shutdown
+
+The runner enumerates functions from the full Proto tree; source tokens provide
+display names only. Indented and assigned functions, colon methods, and anonymous
+functions are included. Comments and strings cannot add function records.
+Duplicate names receive a lexical suffix. FNDA uses call events; LCOV includes
+uncovered lines after a late start and a DA marker for every function start.
+
+Start collection before loading modules when possible. Runtime reports match
+observed lexical paths and bytecode signatures to the current source. For
+preloaded functions without an observed root, only unique signatures are matched.
+If two identical same-line functions are indistinguishable in that fallback, or
+the source changed, the runner warns and omits their ambiguous function/branch
+counts rather than assigning one function's hits to another. Direct queries on
+the original live functions remain distinct.
+
+Tick mode saves periodically and flushes once on normal exit or `os.exit()`.
+Embedded hosts that suspend a hooked Lua 5.4 main thread must still save explicitly
+before closing that state, as described above; finalizers may not run there.
 
 ### Requirements
 

@@ -160,45 +160,28 @@ return {
          assert.is_truthy(lcov_content:match("^TN:"), "tick LCOV should start with TN:")
       end)
 
-      it("does not create GC anchor when tick is true", function()
-         -- Run a subprocess with tick=true and verify _anchor is nil
-         local luacov_cfg = tmpdir .. (is_windows and "\\" or "/") .. ".luacov_anchor"
-         local cfg_fh = assert(io.open(luacov_cfg, "w"))
-         cfg_fh:write(string.format([[
+      it("writes the final report when tick mode exits before its first save interval", function()
+         local sep = is_windows and "\\" or "/"
+         local configfile = tmpdir .. sep .. ".luacov_short_tick"
+         local lcovfile = tmpdir .. sep .. "short_tick.info"
+         local cfg = assert(io.open(configfile, "w"))
+         cfg:write(string.format([[
 return {
    statsfile = %q,
    lcovfile = %q,
+   include = { "sample$" },
    tick = true,
-   savestepsize = 100,
+   savestepsize = 1000000,
 }
-]], tmpdir .. (is_windows and "\\" or "/") .. "anchor_stats.out",
-   tmpdir .. (is_windows and "\\" or "/") .. "anchor_lcov.info"))
-         cfg_fh:close()
-
-         local check_script = tmpdir .. (is_windows and "\\" or "/") .. "check_anchor.lua"
-         local cs_fh = assert(io.open(check_script, "w"))
-         cs_fh:write([[
-local runner = require("cluacov.runner")
-io.write(runner._anchor and "HAS_ANCHOR" or "NO_ANCHOR")
-io.flush()
-]])
-         cs_fh:close()
-
-         local cmd
-         if is_windows then
-            cmd = string.format(
-               'set "LUACOV_CONFIG=%s" && lua "%s"',
-               luacov_cfg, check_script)
-         else
-            cmd = string.format(
-               'LUACOV_CONFIG=%s lua "%s"',
-               luacov_cfg, check_script)
-         end
-         local fh = io.popen(cmd)
-         local result = fh:read("*a")
-         fh:close()
-
-         assert.equal("NO_ANCHOR", result, "runner._anchor should be nil when tick=true")
+]], tmpdir .. sep .. "short_tick.stats", lcovfile))
+         cfg:close()
+         run_with_config(tmpdir, configfile)
+         local report = assert(io.open(lcovfile, "r"))
+         local content = report:read("*a")
+         report:close()
+         assert.matches("FNDA:1,add", content, 1, true)
+         assert.matches("FNDA:1,check", content, 1, true)
+         assert.matches("end_of_record", content, 1, true)
       end)
 
       describe("function coverage (FNDA)", function()

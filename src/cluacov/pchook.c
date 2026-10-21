@@ -18,39 +18,15 @@
 #error "pchook: unsupported Lua version (need 5.4+)"
 #endif
 
-/*
- * Registry keys.
- *
- *   PCHOOK_KEY        : array-style table, keyed by 1-based entry id.
- *                       Each entry is a Lua table with the materialized
- *                       per-Proto metadata + per-PC hit counts:
- *                         { source       = string,   -- copy of getstr(proto->source)
- *                           linedefined  = integer,
- *                           sizecode     = integer,
- *                           lines        = { [pc] = line, ... }, -- 0-based pc
- *                           hits         = { [pc] = count, ... } } -- 0-based pc
- *
- *                       NOTE: PC keys are 0-based, matching the historical
- *                       wire format used by deepbranches and branchcov.
- *                       Do NOT change to 1-based without auditing every
- *                       reader (cluacov.branchcov, runner.lua, tests).
- *                       After build, this table no longer references any
- *                       Proto* pointer, so it remains safe to read even
- *                       inside __gc finalizers.
- *
- *   PROTO_INDEX_KEY   : weak-ish lookup table (Proto* lightuserdata -> entry id).
- *                       Used by the runtime hook to amortize the metadata
- *                       materialization to once per Proto. Cleared by
- *                       l_reset / l_start so stale entries from a previous
- *                       run cannot leak into a fresh collection.
- *
- *   TICK_KEY          : optional tick-mode config table.
- *
- *   SNAPSHOT_*_KEY    : caches built by l_stop (or first call to a getter
- *                       after stop), so subsequent calls are O(1).
- */
+#include "protoinfo.h"
+
+/* Materialized entries contain only Lua data. The private weak-key index
+ * uses collectable Proto values, not lightuserdata addresses: GC removes a
+ * dead Proto's mapping before its address can be reused. It survives stop /
+ * start and does not retain closures, upvalues, or coroutines. */
 static char PCHOOK_KEY;
 static char PROTO_INDEX_KEY;
+static char FRAMES_KEY;
 static char TICK_KEY;
 static char SNAPSHOT_LINE_HITS_KEY;
 static char SNAPSHOT_ALL_HITS_KEY;
@@ -138,42 +114,48 @@ static const char *normalize_source_name(const Proto *proto) {
     return source == NULL ? "?" : source;
 }
 
-/*
- * Materialize per-Proto metadata into a fresh Lua table on top of the stack.
- *
- * Layout of the returned table (top of stack on return):
- *   { source       = string,    -- copy of getstr(proto->source) (or "?")
- *     linedefined  = integer,
- *     sizecode     = integer,
- *     lines        = { [pc] = line, ... },  -- pre-resolved 0-based PC -> line
- *     hits         = {},                    -- 0-based PC -> count, populated by hook
- *   }
- *
- * After this call, the entry table holds NO Proto* references and is therefore
- * safe to read from any context, including __gc finalizers run during
- * lua_close()/luaC_freeallobjects.
- */
-static void materialize_proto_entry(lua_State *L, const Proto *proto) {
-    const char *source;
+/* Lua's GC knows Proto values even though the public API cannot push them.
+ * This private key never escapes to Lua. The caller holds the Proto alive via
+ * an executing closure or a function argument. lua_rawset supplies the table
+ * write barrier, and weak keys avoid retaining any executable object. */
+static void push_proto_key(lua_State *L, const Proto *proto) {
+    lua_pushnil(L);
+    setgcovalue(L, s2v(L->top.p - 1), (GCObject *)proto);
+}
+
+static void new_weak_keys(lua_State *L, void *key) {
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushliteral(L, "k");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, key);
+}
+
+static lua_Integer find_entry_id_for_proto(lua_State *L, const Proto *proto) {
+    lua_Integer id = 0;
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+    if (lua_istable(L, -1)) {
+        push_proto_key(L, proto);
+        lua_rawget(L, -2);
+        id = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    return id;
+}
+
+static void materialize_proto_entry(lua_State *L, const Proto *proto,
+                                    const char *path) {
     int pc;
-
-    lua_createtable(L, 0, 5);
-
-    source = normalize_source_name(proto);
-    lua_pushstring(L, source);   /* makes a Lua-managed copy */
+    lua_createtable(L, 0, 10);
+    set_proto_metadata(L, proto, path);
+    /* Only per-function queries expose a live identity. Stored records must
+       remain usable after the Proto is collected, including at lua_close. */
+    lua_pushnil(L);
+    lua_setfield(L, -2, "proto_id");
+    lua_pushstring(L, normalize_source_name(proto));
     lua_setfield(L, -2, "source");
-
-    lua_pushinteger(L, proto->linedefined);
-    lua_setfield(L, -2, "linedefined");
-
-    lua_pushinteger(L, proto->lastlinedefined);
-    lua_setfield(L, -2, "lastlinedefined");
-
-    lua_pushinteger(L, proto->sizecode);
-    lua_setfield(L, -2, "sizecode");
-
-    /* Pre-resolve PC -> line. PC keys are 0-based to match deepbranches /
-       branchcov, which key off the raw bytecode PC. */
     lua_createtable(L, proto->sizecode, 0);
     for (pc = 0; pc < proto->sizecode; pc++) {
         int line = get_pc_line(proto, pc);
@@ -183,188 +165,116 @@ static void materialize_proto_entry(lua_State *L, const Proto *proto) {
         }
     }
     lua_setfield(L, -2, "lines");
-
-    lua_createtable(L, 0, 0);
+    lua_newtable(L);
     lua_setfield(L, -2, "hits");
+    lua_newtable(L);
+    lua_setfield(L, -2, "edges");
+    lua_pushinteger(L, 0);
+    lua_setfield(L, -2, "calls");
 }
 
-static int entry_matches_proto(lua_State *L, int entry_idx, const Proto *proto) {
-    int pc;
-    int lines_idx;
-    const char *entry_source;
-    const char *proto_source = normalize_source_name(proto);
-
-    lua_getfield(L, entry_idx, "linedefined");
-    if (lua_tointeger(L, -1) != (lua_Integer)proto->linedefined) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, entry_idx, "lastlinedefined");
-    if (lua_tointeger(L, -1) != (lua_Integer)proto->lastlinedefined) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, entry_idx, "sizecode");
-    if (lua_tointeger(L, -1) != (lua_Integer)proto->sizecode) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, entry_idx, "source");
-    entry_source = lua_tostring(L, -1);
-    if (entry_source == NULL || strcmp(entry_source, proto_source) != 0) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    lua_pop(L, 1);
-
-    lua_getfield(L, entry_idx, "lines");
-    if (!lua_istable(L, -1)) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    lines_idx = lua_gettop(L);
-
-    for (pc = 0; pc < proto->sizecode; pc++) {
-        int proto_line = get_pc_line(proto, pc);
-        int entry_line;
-
-        lua_rawgeti(L, lines_idx, pc);
-        entry_line = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-
-        if (entry_line != proto_line) {
-            lua_pop(L, 1);
-            return 0;
-        }
-    }
-
-    lua_pop(L, 1);
-    return 1;
-}
-
-static lua_Integer find_matching_entry_id(
-    lua_State *L,
-    int pchook_idx,
-    const Proto *proto
-) {
-    lua_Integer entry_id;
-    int n = (int)lua_rawlen(L, pchook_idx);
-
-    for (entry_id = 1; entry_id <= n; entry_id++) {
-        int entry_idx;
-
-        lua_rawgeti(L, pchook_idx, entry_id);
-        if (!lua_istable(L, -1)) {
-            lua_pop(L, 1);
-            continue;
-        }
-        entry_idx = lua_gettop(L);
-
-        if (entry_matches_proto(L, entry_idx, proto)) {
-            lua_pop(L, 1);
-            return entry_id;
-        }
-
-        lua_pop(L, 1);
-    }
-
-    return 0;
-}
-
-/*
- * Look up (or create) the entry-id for the given Proto* in PROTO_INDEX_KEY,
- * also ensuring PCHOOK_KEY[entry_id] holds the materialized entry table.
- *
- * On return: pushes the entry's `hits` subtable on the stack (top), and
- * returns nothing. Caller is responsible for popping the hits table.
- *
- * Returns 0 on success, non-zero if PCHOOK_KEY/PROTO_INDEX_KEY are missing
- * (in which case nothing extra is pushed).
- *
- * Stale-mapping guard:
- *   PROTO_INDEX_KEY keys are Proto* lightuserdata.  After GC, Lua may
- *   reuse a freed Proto's address for a brand-new Proto.  Without
- *   validation, the old mapping would silently route the new Proto's
- *   hits into the old entry — wrong source, wrong line table, wrong
- *   hit counts.  We detect this by comparing the stored entry against the
- *   live Proto's source, line range, sizecode, and materialized line map.
- *
- * Re-indexing after stop()/start():
- *   start() is cumulative across sessions unless reset() is called. Since
- *   PROTO_INDEX_KEY is rebuilt on each fresh start, a live Proto may need to
- *   be re-associated with an existing materialized entry from PCHOOK_KEY.
- *   When there is no current Proto* mapping, we scan existing entries for an
- *   exact metadata match before allocating a new one.
- */
-static int push_hits_for_proto(lua_State *L, const Proto *proto) {
-    lua_Integer entry_id;
-    int pchook_idx, index_idx;
-
+/* Register an entire tree when first encountered. A chunk's lexical child
+ * paths distinguish identical same-line siblings and survive file reloads.
+ * A preloaded child whose root was never observed has no absolute path; the
+ * reporter may match it by signature only when that match is unambiguous. */
+static lua_Integer register_proto(lua_State *L, const Proto *proto,
+                                  const char *path) {
+    lua_Integer id;
+    int entries, i;
+    luaL_checkstack(L, 12, "cluacov prototype nesting too deep");
+    id = find_entry_id_for_proto(L, proto);
     lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-    if (lua_isnil(L, -1)) { lua_pop(L, 1); return 1; }
-    pchook_idx = lua_gettop(L);
-
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
-    if (lua_isnil(L, -1)) { lua_pop(L, 2); return 1; }
-    index_idx = lua_gettop(L);
-
-    /* PROTO_INDEX_KEY[Proto*] -> entry_id (or nil if first time). */
-    lua_rawgetp(L, index_idx, (const void *)proto);
-    entry_id = lua_tointeger(L, -1);
+    entries = lua_gettop(L);
+    if (id == 0) {
+        id = (lua_Integer)lua_rawlen(L, entries) + 1;
+        materialize_proto_entry(L, proto, path);
+        lua_rawseti(L, entries, id);
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+        push_proto_key(L, proto);
+        lua_pushinteger(L, id);
+        lua_rawset(L, -3);
+        lua_pop(L, 1);
+    } else if (path != NULL) {
+        lua_rawgeti(L, entries, id);
+        lua_pushstring(L, path);
+        lua_setfield(L, -2, "proto_path");
+        lua_pop(L, 1);
+    }
     lua_pop(L, 1);
-
-    if (entry_id != 0) {
-        /* Validate: detect stale mapping due to Proto address reuse. */
-        int entry_idx;
-        lua_rawgeti(L, pchook_idx, entry_id);
-        entry_idx = lua_gettop(L);
-
-        if (!entry_matches_proto(L, entry_idx, proto)) {
-            /* Stale: drop old entry and fall through to re-index/create. */
-            lua_pop(L, 1);  /* entry */
-            entry_id = 0;
+    for (i = 0; i < proto->sizep; i++) {
+        if (path != NULL) {
+            const char *child = lua_pushfstring(L, "%s.%d", path, i + 1);
+            register_proto(L, proto->p[i], child);
+            lua_pop(L, 1);
         } else {
-            /* Valid mapping: grab hits from the already-fetched entry. */
-            lua_getfield(L, entry_idx, "hits");
-            lua_remove(L, entry_idx);   /* drop entry, keep hits */
-            lua_remove(L, index_idx);
-            lua_remove(L, pchook_idx);
-            return 0;
+            register_proto(L, proto->p[i], NULL);
         }
     }
+    return id;
+}
 
-    if (entry_id == 0) {
-        entry_id = find_matching_entry_id(L, pchook_idx, proto);
-        if (entry_id != 0) {
-            lua_pushinteger(L, entry_id);
-            lua_rawsetp(L, index_idx, (const void *)proto);
+static void push_entry(lua_State *L, const Proto *proto) {
+    lua_Integer id = find_entry_id_for_proto(L, proto);
+    if (id == 0) {
+        id = register_proto(L, proto, proto->linedefined == 0 ? "0" : NULL);
+    }
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
+    lua_rawgeti(L, -1, id);
+    lua_remove(L, -2);
+}
+
+static void increment_field(lua_State *L, int table, const char *field) {
+    lua_Integer count;
+    lua_getfield(L, table, field);
+    count = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    lua_pushinteger(L, count + 1);
+    lua_setfield(L, table, field);
+}
+
+/* Each thread owns a map from CallInfo to the previous observed PC. Call and
+ * return events clear reused frames, including tail calls; error unwinding is
+ * handled by the next call event. Values never reference the thread itself. */
+static void push_frames(lua_State *L) {
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &FRAMES_KEY);
+    lua_pushthread(L);
+    lua_rawget(L, -2);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushthread(L);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, -4);
+    }
+    lua_remove(L, -2);
+}
+
+static void record_transition(lua_State *L, int entry, CallInfo *ci, int pc) {
+    int previous;
+    push_frames(L);
+    lua_rawgetp(L, -1, ci);
+    previous = (int)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    lua_pushinteger(L, pc);
+    lua_rawsetp(L, -2, ci);
+    lua_pop(L, 1);
+    if (previous > 0) {
+        lua_Integer count;
+        lua_getfield(L, entry, "edges");
+        lua_rawgeti(L, -1, previous);
+        if (lua_isnil(L, -1)) {
+            lua_pop(L, 1);
+            lua_newtable(L);
+            lua_pushvalue(L, -1);
+            lua_rawseti(L, -3, previous);
         }
+        lua_rawgeti(L, -1, pc);
+        count = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_pushinteger(L, count + 1);
+        lua_rawseti(L, -2, pc);
+        lua_pop(L, 2);
     }
-
-    /* First time we see this Proto (or unmatched stale mapping): append a fresh entry. */
-    if (entry_id == 0) {
-        entry_id = (lua_Integer)lua_rawlen(L, pchook_idx) + 1;
-        materialize_proto_entry(L, proto);            /* push entry table */
-        lua_rawseti(L, pchook_idx, entry_id);          /* PCHOOK[entry_id] = entry */
-
-        lua_pushinteger(L, entry_id);
-        lua_rawsetp(L, index_idx, (const void *)proto); /* INDEX[Proto*] = entry_id */
-    }
-
-    /* Fetch entry, then its hits subtable. */
-    lua_rawgeti(L, pchook_idx, entry_id);              /* push entry */
-    lua_getfield(L, -1, "hits");                       /* push hits */
-    lua_remove(L, -2);                                 /* drop entry, keep hits */
-
-    lua_remove(L, index_idx);                          /* drop PROTO_INDEX_KEY */
-    lua_remove(L, pchook_idx);                         /* drop PCHOOK_KEY */
-    return 0;
 }
 
 static void pc_hook(lua_State *L, lua_Debug *ar) {
@@ -395,37 +305,44 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
         return;
     }
 
-    /* Handle PC tracking on count events. */
-    Proto *proto;
-    CallInfo *ci;
-    int pc;
-    lua_Integer count;
+    {
+        Proto *proto;
+        CallInfo *ci = (CallInfo *)ar->i_ci;
+        int entry, pc;
+        lua_Integer count;
 
-    lua_getinfo(L, "f", ar);
+        if (ar->event == LUA_HOOKRET || ar->event == LUA_HOOKCALL ||
+            ar->event == LUA_HOOKTAILCALL) {
+            push_frames(L);
+            lua_pushnil(L);
+            lua_rawsetp(L, -2, ci);
+            lua_pop(L, 1);
+            if (ar->event == LUA_HOOKRET) return;
+        }
 
-    if (lua_iscfunction(L, -1)) {
-        lua_pop(L, 1);
-        return;
+        lua_getinfo(L, "f", ar);
+        if (lua_iscfunction(L, -1)) {
+            lua_pop(L, 1);
+            return;
+        }
+        proto = get_proto(L, -1);
+        push_entry(L, proto);
+        entry = lua_gettop(L);
+        if (ar->event == LUA_HOOKCALL || ar->event == LUA_HOOKTAILCALL) {
+            increment_field(L, entry, "calls");
+        } else {
+            pc = (int)(ci->u.l.savedpc - proto->code);
+            record_transition(L, entry, ci, pc);
+            lua_getfield(L, entry, "hits");
+            lua_rawgeti(L, -1, pc);
+            count = lua_tointeger(L, -1);
+            lua_pop(L, 1);
+            lua_pushinteger(L, count + 1);
+            lua_rawseti(L, -2, pc);
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 2);  /* entry and executing closure */
     }
-
-    proto = get_proto(L, -1);
-    lua_pop(L, 1);
-
-    ci = (CallInfo *)ar->i_ci;
-    pc = (int)(ci->u.l.savedpc - proto->code);
-
-    if (push_hits_for_proto(L, proto) != 0) {
-        return;
-    }
-
-    /* Stack top: hits subtable. 0-based PC keys match deepbranches/branchcov. */
-    lua_rawgeti(L, -1, pc);
-    count = lua_tointeger(L, -1) + 1;
-    lua_pop(L, 1);
-    lua_pushinteger(L, count);
-    lua_rawseti(L, -2, pc);
-
-    lua_pop(L, 1);
 }
 
 static int l_get_all_line_hits(lua_State *L);
@@ -508,15 +425,12 @@ static int l_start(lua_State *L) {
         lua_pop(L, 1);
     }
 
-    /* PROTO_INDEX_KEY (Proto* lightuserdata -> entry id) MUST be re-created
-       on every start(): light-userdata identity is meaningful only while the
-       Proto is alive, and Lua may reuse the same address for a fresh Proto
-       across collections. Stale mappings would lead the hook to attribute
-       hits to the wrong entry. */
-    lua_newtable(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
+    if (lua_isnil(L, -1)) new_weak_keys(L, &PROTO_INDEX_KEY);
+    lua_pop(L, 1);
+    new_weak_keys(L, &FRAMES_KEY);
 
-    mask = LUA_MASKCOUNT;
+    mask = LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET;
 
     if (!lua_isnoneornil(L, 1)) {
         luaL_checktype(L, 1, LUA_TTABLE);
@@ -588,58 +502,24 @@ static int l_stop(lua_State *L) {
     aggregate_all_line_hits(L, result_idx);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
 
-    /* IMPORTANT: do NOT drop PROTO_INDEX_KEY here. l_get_hits /
-       l_get_line_hits accept a Lua function argument; while that function
-       is alive (caller holds a reference) the corresponding Proto* is
-       guaranteed to remain valid, and we still need PROTO_INDEX_KEY to
-       map it back to the entry id.
-       PROTO_INDEX_KEY is reset by l_start (every fresh run) and by
-       l_reset (explicit teardown). The shutdown-safety property relied
-       on by GC finalizers comes entirely from PCHOOK_KEY entries being
-       pure Lua data — they never touch Proto* and are read by
-       l_get_all_*. */
-
+    /* Keep the GC-managed Proto index across sessions; reset alone discards
+       cumulative data. Clear frame PCs so no edge crosses a stopped interval. */
+    new_weak_keys(L, &FRAMES_KEY);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &TICK_KEY);
     return 0;
 }
 
-/*
- * Build a (Proto* -> entry_id) index from the live PROTO_INDEX_KEY (when the
- * hook is active) so that l_get_hits / l_get_line_hits can look up the entry
- * for a user-passed function. When the hook is no longer active, this returns
- * 0 (no entry found) and the caller emits an empty result.
- *
- * Returns the entry id (>= 1) on success, or 0 when the proto was never seen.
- */
-static lua_Integer find_entry_id_for_proto(lua_State *L, const Proto *proto) {
-    lua_Integer entry_id;
-
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
-    if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        return 0;
-    }
-    lua_rawgetp(L, -1, (const void *)proto);
-    entry_id = lua_tointeger(L, -1);
-    lua_pop(L, 2);
-    return entry_id;
-}
-
 static int l_reset(lua_State *L) {
-    /* Drop everything: collected entries, Proto* lookup, and snapshot caches. */
     lua_newtable(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
-
-    lua_newtable(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &PROTO_INDEX_KEY);
-
+    new_weak_keys(L, &PROTO_INDEX_KEY);
+    new_weak_keys(L, &FRAMES_KEY);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_LINE_HITS_KEY);
     lua_pushnil(L);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &SNAPSHOT_ALL_HITS_KEY);
-    lua_pushnil(L);
-    lua_rawsetp(L, LUA_REGISTRYINDEX, &HOOK_ACTIVE_KEY);
+    /* reset clears data, not the active session or its tick configuration. */
     return 0;
 }
 
@@ -655,6 +535,11 @@ static int l_reset(lua_State *L) {
  * so they are safe to call from any context, including __gc finalizers.
  * ---------------------------------------------------------------------------
  */
+
+static void copy_field(lua_State *L, int from, int to, const char *name) {
+    lua_getfield(L, from, name);
+    lua_setfield(L, to, name);
+}
 
 static void aggregate_all_hits(lua_State *L, int result_idx) {
     int pchook_idx;
@@ -691,18 +576,16 @@ static void aggregate_all_hits(lua_State *L, int result_idx) {
         list_idx = lua_gettop(L);
         list_len = (int)lua_rawlen(L, list_idx);
 
-        /* Build { linedefined, sizecode, hits } using absolute entry_idx. */
-        lua_createtable(L, 0, 3);
+        lua_createtable(L, 0, 8);
         rec_idx = lua_gettop(L);
-
-        lua_getfield(L, entry_idx, "linedefined");
-        lua_setfield(L, rec_idx, "linedefined");
-        lua_getfield(L, entry_idx, "lastlinedefined");
-        lua_setfield(L, rec_idx, "lastlinedefined");
-        lua_getfield(L, entry_idx, "sizecode");
-        lua_setfield(L, rec_idx, "sizecode");
-        lua_getfield(L, entry_idx, "hits");
-        lua_setfield(L, rec_idx, "hits");
+        copy_field(L, entry_idx, rec_idx, "linedefined");
+        copy_field(L, entry_idx, rec_idx, "lastlinedefined");
+        copy_field(L, entry_idx, rec_idx, "sizecode");
+        copy_field(L, entry_idx, rec_idx, "proto_path");
+        copy_field(L, entry_idx, rec_idx, "signature");
+        copy_field(L, entry_idx, rec_idx, "hits");
+        copy_field(L, entry_idx, rec_idx, "edges");
+        copy_field(L, entry_idx, rec_idx, "calls");
 
         lua_rawseti(L, list_idx, list_len + 1);
         /* Pop list, source string, entry. */
@@ -896,45 +779,35 @@ static int l_get_all_line_hits(lua_State *L) {
     return 1;
 }
 
-/*
- * l_get_hits / l_get_line_hits — per-function variants. These are only useful
- * while pchook is still active (the caller passes a live function whose
- * Proto* must still be valid to traverse `proto->p[]`); after stop() they
- * fall back to "empty" because we no longer have a reliable Proto* -> entry
- * mapping for nested protos.
- */
+/* Per-function queries use a live Proto tree and expose its opaque identity
+ * for joining with deepbranches. No structural metadata can stand in for it. */
 static void collect_proto_hits_recursive(
-    lua_State *L,
-    Proto *proto,
-    int result_idx,
-    int *count
+    lua_State *L, Proto *proto, int result_idx, int *count
 ) {
     lua_Integer entry_id;
-    int i;
-
-    /* Build a per-Proto record: { linedefined, lastlinedefined, sizecode, hits }. */
-    lua_createtable(L, 0, 4);
-    lua_pushinteger(L, proto->linedefined);
-    lua_setfield(L, -2, "linedefined");
-    lua_pushinteger(L, proto->lastlinedefined);
-    lua_setfield(L, -2, "lastlinedefined");
-    lua_pushinteger(L, proto->sizecode);
-    lua_setfield(L, -2, "sizecode");
-
+    int i, record;
+    luaL_checkstack(L, 12, "cluacov prototype nesting too deep");
+    lua_createtable(L, 0, 9);
+    record = lua_gettop(L);
+    set_proto_metadata(L, proto, NULL);
     entry_id = find_entry_id_for_proto(L, proto);
     if (entry_id > 0) {
         lua_rawgetp(L, LUA_REGISTRYINDEX, &PCHOOK_KEY);
         lua_rawgeti(L, -1, entry_id);
-        lua_getfield(L, -1, "hits");
-        lua_remove(L, -2);  /* entry */
-        lua_remove(L, -2);  /* PCHOOK_KEY */
+        copy_field(L, lua_gettop(L), record, "hits");
+        copy_field(L, lua_gettop(L), record, "edges");
+        copy_field(L, lua_gettop(L), record, "calls");
+        copy_field(L, lua_gettop(L), record, "proto_path");
+        lua_pop(L, 2);
     } else {
         lua_newtable(L);
+        lua_setfield(L, record, "hits");
+        lua_newtable(L);
+        lua_setfield(L, record, "edges");
+        lua_pushinteger(L, 0);
+        lua_setfield(L, record, "calls");
     }
-    lua_setfield(L, -2, "hits");
-
     lua_rawseti(L, result_idx, ++(*count));
-
     for (i = 0; i < proto->sizep; i++) {
         collect_proto_hits_recursive(L, proto->p[i], result_idx, count);
     }
@@ -1077,19 +950,19 @@ static int l_get_line_hits(lua_State *L) {
  * Used by runner.lua to discover lastlinedefined for uncalled functions.
  */
 static void collect_func_defs_recursive(
-    lua_State *L, Proto *proto, int result_idx, int *count
+    lua_State *L, Proto *proto, int result_idx, int *count, const char *path
 ) {
     int i;
+    luaL_checkstack(L, 12, "cluacov prototype nesting too deep");
     if (proto->linedefined > 0) {
-        lua_createtable(L, 0, 2);
-        lua_pushinteger(L, proto->linedefined);
-        lua_setfield(L, -2, "linedefined");
-        lua_pushinteger(L, proto->lastlinedefined);
-        lua_setfield(L, -2, "lastlinedefined");
+        lua_createtable(L, 0, 6);
+        set_proto_metadata(L, proto, path);
         lua_rawseti(L, result_idx, ++(*count));
     }
     for (i = 0; i < proto->sizep; i++) {
-        collect_func_defs_recursive(L, proto->p[i], result_idx, count);
+        const char *child = lua_pushfstring(L, "%s.%d", path, i + 1);
+        collect_func_defs_recursive(L, proto->p[i], result_idx, count, child);
+        lua_pop(L, 1);
     }
 }
 
@@ -1107,7 +980,7 @@ static int l_get_func_defs(lua_State *L) {
     lua_newtable(L);
     result_idx = lua_gettop(L);
 
-    collect_func_defs_recursive(L, proto, result_idx, &count);
+    collect_func_defs_recursive(L, proto, result_idx, &count, "0");
     return 1;
 }
 

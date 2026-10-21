@@ -13,6 +13,16 @@
 
 ### Bug fixes
 
+- Keep independent same-line functions separate with a GC-managed Proto index;
+  stripped bytecode reuses its records, and stop/start preserves per-function
+  queries without another call. Function entries are counted with call events.
+- Track branch edges within each invocation, including generic iterators' fused
+  first iteration; shared targets no longer give skipped paths false coverage.
+- Build LCOV function records from the full Proto tree, include assigned,
+  indented, method and anonymous functions, and ignore function-like comments
+  and strings. Preserve uncovered lines after late collection starts.
+- Flush tick-mode reports on normal exit, including runs shorter than one tick.
+
 - `cluacov.pchook`: on Lua 5.4, `start()` called from a coroutine no longer
   hooks a main thread driven by `lua_resume` (for example under ltask). When the
   state was closed while that thread was suspended, Lua 5.4 aborted every

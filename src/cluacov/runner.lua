@@ -1,6 +1,7 @@
 local pchook = require("cluacov.pchook")
 local deepbranches = require("cluacov.deepbranches")
 local deepactivelines = require("cluacov.deepactivelines")
+local branchcov = require("cluacov.branchcov")
 
 local runner = {}
 
@@ -126,7 +127,135 @@ local function proto_key(proto)
       proto.linedefined or 0,
       proto.lastlinedefined or 0,
       proto.sizecode or 0,
+      proto.signature or "",
    }, ":")
+end
+
+-- Read only real Lua tokens for display names. Function existence and lexical
+-- order come from the Proto tree, so comments/strings cannot change FNF.
+local function function_names(source, definitions)
+   local tokens = {}
+   local i, line = 1, 1
+   local function advance(next_i)
+      local _, newlines = source:sub(i, next_i - 1):gsub("\n", "")
+      line = line + newlines
+      i = next_i
+   end
+   while i <= #source do
+      local char = source:sub(i, i)
+      local comment = source:sub(i, i + 1) == "--"
+      local start = comment and i + 2 or i
+      local equals = source:match("^%[(=*)%[", start)
+      if equals then
+         local _, finish = source:find("]" .. equals .. "]", start + #equals + 2, true)
+         advance(finish and finish + 1 or #source + 1)
+      elseif comment or (i == 1 and source:sub(1, 2) == "#!") then
+         advance(source:find("\n", i, true) or #source + 1)
+      elseif char == "'" or char == '"' then
+         local finish = i + 1
+         while finish <= #source do
+            local next_char = source:sub(finish, finish)
+            if next_char == "\\" then
+               finish = finish + 2
+            elseif next_char == char then
+               finish = finish + 1
+               break
+            else
+               finish = finish + 1
+            end
+         end
+         advance(finish)
+      elseif char:match("%s") then
+         advance(i + 1)
+      else
+         local word = source:match("^[_%a][_%w]*", i)
+         tokens[#tokens + 1] = { value = word or char, line = line }
+         advance(i + #(word or char))
+      end
+   end
+
+   local names = {}
+   for index, token in ipairs(tokens) do
+      if token.value == "function" then
+         local name
+         local j = index + 1
+         while tokens[j] and tokens[j].value ~= "(" do
+            if tokens[j].value:match("^[_%a][_%w]*$") then
+               name = tokens[j].value
+            end
+            j = j + 1
+         end
+         if not name and tokens[index - 1] and tokens[index - 1].value == "=" then
+            local previous = tokens[index - 2]
+            if previous and previous.value:match("^[_%a][_%w]*$")
+               and not (tokens[index - 3] and tokens[index - 3].value == ",")
+            then
+               name = previous.value
+            end
+         end
+         names[#names + 1] = { name = name, line = token.line }
+      end
+   end
+
+   local used = {}
+   for index, def in ipairs(definitions) do
+      local token = names[index]
+      local name = token and token.line == def.linedefined and token.name
+         or ("anonymous@" .. def.linedefined .. ":" .. def.proto_path)
+      if used[name] then
+         name = name .. "@" .. def.linedefined .. ":" .. def.proto_path
+      end
+      used[name] = true
+      def.name = name
+   end
+end
+
+local function add_counts(to, from)
+   for key, count in pairs(from or {}) do
+      to[key] = (to[key] or 0) + count
+   end
+end
+
+local function match_records(root, definitions, entries)
+   local by_path, by_shape, result = {}, {}, {}
+   local unmatched = 0
+   local function add_definition(def)
+      by_path[def.proto_path] = def
+      local key = proto_key(def)
+      if by_shape[key] == nil then
+         by_shape[key] = def
+      else
+         by_shape[key] = false -- ambiguous without an observed lexical path
+      end
+   end
+   root.proto_path = "0"
+   add_definition(root)
+   for _, def in ipairs(definitions) do add_definition(def) end
+   for _, entry in ipairs(entries) do
+      local def
+      if entry.proto_path then
+         def = by_path[entry.proto_path]
+         if def and proto_key(def) ~= proto_key(entry) then def = nil end
+      else
+         def = by_shape[proto_key(entry)]
+      end
+      if def then
+         local target = result[def.proto_path]
+         if not target then
+            target = { hits = {}, edges = {}, calls = 0 }
+            result[def.proto_path] = target
+         end
+         target.calls = target.calls + (entry.calls or 0)
+         add_counts(target.hits, entry.hits)
+         for pc, successors in pairs(entry.edges or {}) do
+            target.edges[pc] = target.edges[pc] or {}
+            add_counts(target.edges[pc], successors)
+         end
+      elseif (entry.calls or 0) > 0 or next(entry.hits or {}) then
+         unmatched = unmatched + 1
+      end
+   end
+   return result, unmatched
 end
 
 local function resolve_path(filename)
@@ -181,6 +310,8 @@ local function write_luacov_stats(config, all_line_hits)
    fd:close()
 end
 
+local warned_sources = {}
+
 local function write_lcov(config, all_line_hits, all_hits)
    local sources = {}
    for source in pairs(all_line_hits) do
@@ -207,96 +338,52 @@ local function write_lcov(config, all_line_hits, all_hits)
 
       fd:write("SF:", resolve_path(filename), "\n")
 
-      local source_lines = {}
+      local source_text = ""
       local fh = io.open(filename, "r")
       if fh then
-         for line in fh:lines() do
-            source_lines[#source_lines + 1] = line
-         end
+         source_text = fh:read("*a")
          fh:close()
       end
-
-      local func_defs = {}
-      for line_nr, line in ipairs(source_lines) do
-         local fname = line:match("^function%s+%S-%.([%w_]+)")
-            or line:match("^function%s+([%w_]+)")
-            or line:match("^local%s+function%s+([%w_]+)")
-         if fname then
-            func_defs[#func_defs + 1] = { line = line_nr, name = fname }
-         end
+      local func_defs = pchook.get_func_defs(func)
+      function_names(source_text, func_defs)
+      local records, unmatched = match_records(pchook.get_hits(func)[1], func_defs, proto_list)
+      if unmatched > 0 and not warned_sources[source] then
+         warned_sources[source] = true
+         io.stderr:write(string.format(
+            "[cluacov] warning: %d function record(s) cannot be matched uniquely to %s; "
+               .. "their function/branch counts are omitted (source changed or collection started after loading)\n",
+            unmatched, filename))
       end
 
       for _, fn in ipairs(func_defs) do
-         fd:write(string.format("FN:%d,%s\n", fn.line, fn.name))
+         fd:write(string.format("FN:%d,%s\n", fn.linedefined, fn.name))
       end
       fd:write(string.format("FNF:%d\n", #func_defs))
 
-      -- Build lookup: linedefined -> call count from proto body hits.
-      -- A function is only counted as "called" when its Proto's body
-      -- was actually entered, not merely when the OP_CLOSURE instruction
-      -- at the definition site executed.
-      -- Normal functions record their entry-point hit at hits[1] (PC 0
-      -- produces savedpc 1). Vararg functions have OP_VARARGPREP at PC 0
-      -- which does not trigger the count hook, so hits[1] is absent and
-      -- the first recorded hit is hits[2]. Fall back accordingly.
-      local fn_call_counts = {}
-      for _, entry in ipairs(proto_list) do
-         local ld = entry.linedefined
-         if ld > 0 then
-            local count = entry.hits[1] or entry.hits[2] or 0
-            if count > 0 then
-               fn_call_counts[ld] = (fn_call_counts[ld] or 0) + count
-            end
-         end
-      end
-
       local fns_hit = 0
+      local definition_lines = {}
       for _, fn in ipairs(func_defs) do
-         local hits = fn_call_counts[fn.line] or 0
+         local entry = records[fn.proto_path]
+         local hits = entry and entry.calls or 0
          fd:write(string.format("FNDA:%d,%s\n", hits, fn.name))
          if hits > 0 then fns_hit = fns_hit + 1 end
-      end
-      fd:write(string.format("FNH:%d\n", fns_hit))
-
-      local hits_by_ld = {}
-      for _, entry in ipairs(proto_list) do
-         local key = proto_key(entry)
-         local existing = hits_by_ld[key]
-         if existing then
-            for pc, count in pairs(entry.hits) do
-               existing[pc] = (existing[pc] or 0) + count
-            end
-         else
-            local copy = {}
-            for pc, count in pairs(entry.hits) do
-               copy[pc] = count
-            end
-            hits_by_ld[key] = copy
+         if not active_lines[fn.linedefined] then
+            definition_lines[fn.linedefined] = (definition_lines[fn.linedefined] or 0) + hits
          end
       end
+      -- genhtml needs a DA category at every FN start. A nested function's
+      -- declaration need not have its own line-hook instruction (e.g. Lua
+      -- puts CLOSURE on its end line); use call counts for that marker.
+      for line in pairs(definition_lines) do active_lines[line] = true end
+      fd:write(string.format("FNH:%d\n", fns_hit))
 
       local block_id = 0
       local brf, brh = 0, 0
       for _, b in ipairs(branches) do
-         local proto_hits = hits_by_ld[proto_key(b)] or {}
-         -- b.pc is the branch source instruction (savedpc convention).
-         -- If the branch instruction itself was never executed, all
-         -- target hit counts are noise from other code paths converging
-         -- on the same target PCs — suppress them.
-         local branch_hit = (proto_hits[b.pc] or 0) > 0
+         local entry = records[b.proto_path]
          brf = brf + #b.targets
          for ti, t in ipairs(b.targets) do
-            local taken
-            if t.pc < 0 then
-               local call_pc = -t.pc
-               local success_pc = call_pc + 1
-               local call_hits = proto_hits[call_pc] or 0
-               local success_hits = proto_hits[success_pc] or 0
-               local diff = call_hits - success_hits
-               taken = branch_hit and (diff > 0 and diff or 0) or 0
-            else
-               taken = branch_hit and (proto_hits[t.pc] or 0) or 0
-            end
+            local taken = branchcov.target_hits(b, t, entry)
             fd:write(string.format("BRDA:%d,%d,%d,%s\n",
                b.line, block_id, ti - 1,
                taken > 0 and tostring(taken) or "-"))
@@ -307,35 +394,24 @@ local function write_lcov(config, all_line_hits, all_hits)
       fd:write(string.format("BRF:%d\n", brf))
       fd:write(string.format("BRH:%d\n", brh))
 
-      -- Collect definition lines of uncalled functions. The hit on these
-      -- lines comes from OP_CLOSURE in the parent chunk, not from the
-      -- function being entered, so it should not count as line coverage.
-      -- In Lua 5.4 CLOSURE is at linedefined; in Lua 5.5 it moves to
-      -- lastlinedefined (the `end` line), so both must be suppressed.
-      -- get_func_defs traverses the full Proto tree of the loaded file,
-      -- including protos that were never entered by the hook.
-      local uncalled_def_lines = {}
-      local uncalled_ld_set = {}
-      for _, fn in ipairs(func_defs) do
-         if not fn_call_counts[fn.line] then
-            uncalled_def_lines[fn.line] = true
-            uncalled_ld_set[fn.line] = true
-         end
+      -- Do not turn a shared line red when another function on it was called.
+      local uncalled_def_lines, called_def_lines = {}, {}
+      for _, def in ipairs(func_defs) do
+         local entry = records[def.proto_path]
+         local lines = entry and entry.calls > 0 and called_def_lines or uncalled_def_lines
+         lines[def.linedefined] = true
+         lines[def.lastlinedefined] = true
       end
-      for _, def in ipairs(pchook.get_func_defs(func)) do
-         if uncalled_ld_set[def.linedefined] then
-            local lld = def.lastlinedefined
-            if lld and lld > 0 and lld ~= def.linedefined then
-               uncalled_def_lines[lld] = true
-            end
-         end
-      end
+      for line in pairs(called_def_lines) do uncalled_def_lines[line] = nil end
 
       local lf, lh = 0, 0
       local max = line_data.max or 0
+      for line_nr in pairs(active_lines) do
+         if line_nr > max then max = line_nr end
+      end
       for line_nr = 1, max do
          if active_lines[line_nr] then
-            local hits = line_data[line_nr] or 0
+            local hits = definition_lines[line_nr] or line_data[line_nr] or 0
             if uncalled_def_lines[line_nr] then hits = 0 end
             fd:write(string.format("DA:%d,%d\n", line_nr, hits))
             lf = lf + 1
@@ -401,11 +477,11 @@ function runner.init(configfile)
       raw_os_exit(code, close)
    end
 
-   if not runner.tick then
-      local anchor = (newproxy or function() return {} end)()
-      debug.setmetatable(anchor, { __gc = on_exit })
-      runner._anchor = anchor
-   end
+   -- Periodic saves do not replace the final flush: a short process may
+   -- exit before its first tick, or execute more code after its last tick.
+   local anchor = (newproxy or function() return {} end)()
+   debug.setmetatable(anchor, { __gc = on_exit })
+   runner._anchor = anchor
 end
 
 runner.init()

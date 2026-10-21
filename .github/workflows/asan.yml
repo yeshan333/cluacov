@@ -90,5 +90,8 @@ jobs:
         echo "==> busted (ASan)"
         busted
 
+        echo "==> coverage contracts (ASan)"
+        env -u LD_PRELOAD python3 spec/native/check_coverage_contracts.py --preload "$LD_PRELOAD"
+
         echo "==> e2e (ASan)"
         ./e2e/run_all.sh

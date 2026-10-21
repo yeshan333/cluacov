@@ -189,7 +189,7 @@ describe("branchcov", function()
             assert.is_true(result.total >= 6)
          end)
 
-         it("shows per-instruction coverage for compound or", function()
+         it("leaves skipped operands uncovered when the first operand of or is true", function()
             local func = load_function([[
                return function(a, b, c)
                   if a or b or c then
@@ -206,14 +206,11 @@ describe("branchcov", function()
 
             local result = branchcov.analyze(func)
 
-            local partial_count = 0
-            for _, b in ipairs(result.branches) do
-               if b.kind == "test" and b.status == "partial" then
-                  partial_count = partial_count + 1
-               end
-            end
-            assert.is_true(partial_count >= 2)
-            assert.is_true(result.hit < result.total)
+            assert.equal("partial", result.branches[1].status)
+            assert.equal("uncovered", result.branches[2].status)
+            assert.equal("uncovered", result.branches[3].status)
+            assert.equal(1, result.hit)
+            assert.equal(6, result.total)
          end)
 
          it("handles compound and", function()
@@ -410,7 +407,7 @@ describe("branchcov", function()
             assert.is_nil(assert_branch)
          end)
 
-         it("demonstrates the limitation where success path of assert is a merge point for other control flows", function()
+         it("counts a failed assert separately from a goto that reaches its success continuation", function()
             local func = load_function([[
                return function(err, jump)
                   if jump then
@@ -447,8 +444,8 @@ describe("branchcov", function()
                end
             end
 
-            assert.equal(1, success_hits)
-            assert.equal(0, failure_hits)
+            assert.equal(0, success_hits)
+            assert.equal(1, failure_hits)
             assert.equal("partial", assert_branch.status)
          end)
       end)

@@ -7,7 +7,7 @@
 --   *defines* a function runs in the parent chunk, giving the definition
 --   line a hit count > 0. The old code used this line hit as the FNDA
 --   value, making every defined function appear "called" even if its body
---   was never entered. The fix uses per-Proto body hits (hits[1]) to
+--   was never entered. The fix uses per-Proto call events to
 --   determine actual call counts.
 --
 --   This test creates a sample module with 5 functions, calls only 3 of
@@ -121,21 +121,20 @@ print("=== Step 3: Analyzing function coverage ===")
 
 local proto_hits = pchook.get_hits(sample_chunk)
 
--- Build fn_call_counts from proto body hits (same logic as runner.lua).
--- Normal functions: hits[1]; vararg functions (OP_VARARGPREP at PC 0
--- skips the count hook): fall back to hits[2].
+-- Build fn_call_counts from observed call events.
+-- Call events count entries independently of loops at the first PC.
 local fn_call_counts = {}
 for _, entry in ipairs(proto_hits) do
    local ld = entry.linedefined
    if ld > 0 then
-      local count = entry.hits[1] or entry.hits[2] or 0
+      local count = entry.calls or 0
       if count > 0 then
          fn_call_counts[ld] = (fn_call_counts[ld] or 0) + count
       end
    end
 end
 
--- Parse source to extract function definitions (same regex as runner.lua)
+-- Parse the simple named declarations in this fixed demo fixture.
 local source_lines = {}
 for line in io.lines(sample_path) do
    source_lines[#source_lines + 1] = line

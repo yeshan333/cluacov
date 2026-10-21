@@ -4,11 +4,32 @@ local pchook = require("cluacov.pchook")
 local M = {}
 
 local function proto_key(proto)
+   if proto.proto_id then return proto.proto_id end
    return table.concat({
       proto.linedefined or 0,
       proto.lastlinedefined or 0,
       proto.sizecode or 0,
    }, ":")
+end
+
+-- Share the exact same edge interpretation with the LCOV writer. An absent
+-- source instruction never acquires hits from a converging control-flow path.
+function M.target_hits(branch, target, entry)
+   entry = entry or {}
+   local hits = entry.hits or {}
+   if (hits[branch.pc] or 0) + (hits[branch.entry_pc] or 0) == 0 then return 0 end
+   local successors = entry.edges and entry.edges[branch.pc] or {}
+   if target.pc < 0 then
+      local call_pc = -target.pc
+      local successes = entry.edges and (successors[call_pc + 1] or 0)
+         or (hits[call_pc + 1] or 0)
+      return math.max(0, (hits[call_pc] or 0) - successes)
+   end
+   if entry.edges then
+      local first_iteration = entry.edges[branch.entry_pc] or {}
+      return (successors[target.pc] or 0) + (first_iteration[target.pc] or 0)
+   end
+   return hits[target.pc] or 0
 end
 
 function M.analyze(func)
@@ -17,7 +38,7 @@ function M.analyze(func)
 
    local hits_by_func = {}
    for _, entry in ipairs(all_hits) do
-      hits_by_func[proto_key(entry)] = entry.hits
+      hits_by_func[proto_key(entry)] = entry
    end
 
    local result_branches = {}
@@ -25,22 +46,12 @@ function M.analyze(func)
    local hit = 0
 
    for _, branch in ipairs(branches) do
-      local proto_hits = hits_by_func[proto_key(branch)] or {}
+      local entry = hits_by_func[proto_key(branch)]
       local targets = {}
       local targets_hit = 0
 
       for _, target in ipairs(branch.targets) do
-         local target_hits
-         if target.pc < 0 then
-            local call_pc = -target.pc
-            local success_pc = call_pc + 1
-            local call_hits = proto_hits[call_pc] or 0
-            local success_hits = proto_hits[success_pc] or 0
-            target_hits = call_hits - success_hits
-            if target_hits < 0 then target_hits = 0 end
-         else
-            target_hits = proto_hits[target.pc] or 0
-         end
+         local target_hits = M.target_hits(branch, target, entry)
          targets[#targets + 1] = {
             pc = target.pc,
             line = target.line,

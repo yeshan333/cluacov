@@ -50,6 +50,10 @@ jobs:
       run: |
         busted -o htest
 
+    - name: Collector and LCOV regression contracts
+      if: matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5'
+      run: python3 spec/native/check_coverage_contracts.py
+
     - name: Reject incompatible state layouts before taking ownership of hooks
       if: matrix.os == 'ubuntu-latest' && (matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5')
       run: python3 spec/native/check_state_layout.py --include "$(luarocks config variables.LUA_INCDIR)"

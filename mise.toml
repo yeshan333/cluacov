@@ -109,6 +109,9 @@ export LD_PRELOAD="$ASAN_LIB"
 echo "==> busted (ASan)"
 ./bin/busted
 
+echo "==> coverage contracts (ASan)"
+env -u LD_PRELOAD python3 spec/native/check_coverage_contracts.py --preload "$LD_PRELOAD"
+
 echo "==> e2e (ASan)"
 ./e2e/run_all.sh
 '
@@ -154,6 +157,9 @@ export LD_PRELOAD="$ASAN_LIB"
 # 5.5 interpreter, not whatever 5.4-tree busted is on the global PATH.
 echo "==> busted (ASan)"
 ./bin/busted
+
+echo "==> coverage contracts (ASan)"
+env -u LD_PRELOAD python3 spec/native/check_coverage_contracts.py --preload "$LD_PRELOAD"
 
 echo "==> e2e (ASan)"
 ./e2e/run_all.sh

@@ -51,6 +51,10 @@
 
 #ifdef PUCRIOLUA
 
+#if LUA_VERSION_NUM >= 504
+#include "protoinfo.h"
+#endif
+
 static Proto *get_proto(lua_State *L) {
     return ((Closure *) lua_topointer(L, 1))->l.p;
 }
@@ -140,6 +144,7 @@ static void push_target(lua_State *L, const Proto *proto, int pc, int fallback_l
 static void add_branch_site(
     lua_State *L,
     const Proto *proto,
+    const char *path,
     int result_index,
     int *count,
     int pc,
@@ -172,20 +177,41 @@ static void add_branch_site(
     lua_pushinteger(L, line);
     lua_setfield(L, -2, "line");
 
+#if LUA_VERSION_NUM >= 504
+    set_proto_metadata(L, proto, path);
+#else
     lua_pushinteger(L, proto->linedefined);
     lua_setfield(L, -2, "linedefined");
-
     lua_pushinteger(L, proto->lastlinedefined);
     lua_setfield(L, -2, "lastlinedefined");
-
     lua_pushinteger(L, proto->sizecode);
     lua_setfield(L, -2, "sizecode");
+    lua_pushstring(L, path);
+    lua_setfield(L, -2, "proto_path");
+#endif
 
     lua_pushinteger(L, pc + 1);
     lua_setfield(L, -2, "pc");
 
     lua_pushstring(L, kind);
     lua_setfield(L, -2, "kind");
+
+#if LUA_VERSION_NUM >= 504
+    if (strcmp(kind, "iterator") == 0) {
+        int prep;
+        /* TFORPREP performs the first TFORCALL/TFORLOOP without another
+           count event. Its outgoing edge belongs to this iterator too. */
+        for (prep = 0; prep < pc; prep++) {
+            Instruction instruction = proto->code[prep];
+            if (GET_OPCODE(instruction) == OP_TFORPREP &&
+                prep + 1 + GETARG_Bx(instruction) == pc) {
+                lua_pushinteger(L, prep + 1);
+                lua_setfield(L, -2, "entry_pc");
+                break;
+            }
+        }
+    }
+#endif
 
     lua_newtable(L);
     push_target(L, proto, first_target_pc, line);
@@ -273,8 +299,9 @@ static int is_test_opcode(OpCode opcode) {
     }
 }
 
-static void add_branches(lua_State *L, Proto *proto, int result_index, int *count) {
+static void add_branches(lua_State *L, Proto *proto, int result_index, int *count, const char *path) {
     int pc;
+    luaL_checkstack(L, 12, "cluacov prototype nesting too deep");
 
     if (proto->lineinfo == NULL) {
         return;
@@ -292,6 +319,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
                 add_branch_site(
                     L,
                     proto,
+                    path,
                     result_index,
                     count,
                     pc,
@@ -308,6 +336,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
             add_branch_site(
                 L,
                 proto,
+                path,
                 result_index,
                 count,
                 pc,
@@ -322,6 +351,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
             add_branch_site(
                 L,
                 proto,
+                path,
                 result_index,
                 count,
                 pc,
@@ -341,6 +371,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
             add_branch_site(
                 L,
                 proto,
+                path,
                 result_index,
                 count,
                 pc - 1,
@@ -355,6 +386,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
             add_branch_site(
                 L,
                 proto,
+                path,
                 result_index,
                 count,
                 pc,
@@ -374,6 +406,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
                 add_branch_site(
                     L,
                     proto,
+                    path,
                     result_index,
                     count,
                     pc,
@@ -388,6 +421,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
             add_branch_site(
                 L,
                 proto,
+                path,
                 result_index,
                 count,
                 pc - 1,
@@ -406,6 +440,7 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
                 add_branch_site(
                     L,
                     proto,
+                    path,
                     result_index,
                     count,
                     pc,
@@ -419,7 +454,9 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
     }
 
     for (pc = 0; pc < proto->sizep; pc++) {
-        add_branches(L, proto->p[pc], result_index, count);
+        const char *child = lua_pushfstring(L, "%s.%d", path, pc + 1);
+        add_branches(L, proto->p[pc], result_index, count, child);
+        lua_pop(L, 1);
     }
 }
 
@@ -443,7 +480,7 @@ static int l_deepbranches(lua_State *L) {
     result_index = lua_absindex(L, -1);
 
 #ifdef PUCRIOLUA
-    add_branches(L, get_proto(L), result_index, &count);
+    add_branches(L, get_proto(L), result_index, &count, "0");
 #else
     (void) get_proto(L);
 #endif

@@ -144,18 +144,17 @@ end
 
 lcov_fh:write(string.format("FNF:%d\n", #func_defs))
 
--- Build lookup: linedefined -> call count from proto body hits.
+-- Build lookup: linedefined -> observed call count.
 -- A function is only counted as "called" when its Proto's body
 -- was actually entered, not merely when the OP_CLOSURE instruction
 -- at the definition site executed.
--- Normal functions: hits[1]; vararg functions (OP_VARARGPREP at PC 0
--- skips the count hook): fall back to hits[2].
+-- Call events count entries independently of loops at the first PC.
 local proto_hits = pchook.get_hits(sample_func)
 local fn_call_counts = {}
 for _, entry in ipairs(proto_hits) do
    local ld = entry.linedefined
    if ld > 0 then
-      local count = entry.hits[1] or entry.hits[2] or 0
+      local count = entry.calls or 0
       if count > 0 then
          fn_call_counts[ld] = (fn_call_counts[ld] or 0) + count
       end

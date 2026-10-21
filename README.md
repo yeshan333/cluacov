@@ -48,10 +48,10 @@ be distinguished at line granularity.
 
 The new approach uses `LUA_MASKCOUNT` with count=1 to fire a C-level hook on
 **every bytecode instruction**. Each instruction's program counter (PC) is
-recorded independently, so every branch target has its own hit count. Combined
-with `branchcov.lua`, this provides true per-instruction branch coverage
-without filtering. An optional "tick" mode enables periodic stats saving for
-long-running processes.
+recorded independently. Call/return hooks track function entries and distinguish
+successive PCs within each invocation, so `branchcov.lua` counts actual branch
+edges even when several branches share a target. An optional "tick" mode saves
+periodically and also flushes at normal process exit.
 
 ### Comparison
 
@@ -59,9 +59,9 @@ long-running processes.
 
 | Aspect | Old (hook.c) | New (pchook.c + branchcov.lua) |
 |---|---|---|
-| **Hook type** | `LUA_MASKLINE` | `LUA_MASKCOUNT` (count=1) |
+| **Hook type** | `LUA_MASKLINE` | count=1 + call/return events |
 | **Granularity** | Per source line | Per bytecode instruction (PC) |
 | **Compound conditions** | Blind: `if a or b or c` = 1 hit | Each TEST instruction counted |
 | **Lua 5.1–5.3** | Supported | Not supported |
 | **LuaJIT** | Supported | Not supported |
-| **Performance** | Moderate | Comparable; faster on loop-heavy code, slower overall ([benchmark](docs/benchmark.md)) |
+| **Performance** | Moderate | Measure with edge tracking; [historical benchmarks](docs/benchmark.md) predate it |
