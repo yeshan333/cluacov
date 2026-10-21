@@ -56,7 +56,7 @@ jobs:
     # BEFORE we declare a clean cluacov run "no leaks". A clean run with
     # broken LSan would be a silent false negative.
     - name: LSan canary
-      run: ./spec/asan_lsan_canary.sh
+      run: ./spec/asan/asan_lsan_canary.sh
 
     - name: Install busted (test runner)
       run: luarocks install busted
@@ -84,7 +84,7 @@ jobs:
 
         export ASAN_OPTIONS="abort_on_error=0:detect_leaks=1:print_stacktrace=1"
         export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
-        export LSAN_OPTIONS="suppressions=$PWD/spec/asan_lsan_suppressions.txt:print_suppressions=1"
+        export LSAN_OPTIONS="suppressions=$PWD/spec/asan/asan_lsan_suppressions.txt:print_suppressions=1"
         export LD_PRELOAD="$ASAN_LIB"
 
         echo "==> busted (ASan)"

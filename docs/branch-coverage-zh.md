@@ -278,8 +278,13 @@ pchook.reset()                     -- 清空所有记录数据（采集继续运
 新一轮采样应调用 `reset()`。
 
 采集作用于整个 Lua 状态：`start()` 会给主线程和所有已有协程安装 hook，
-包括已挂起的协程及 `coroutine.wrap` 闭包持有的协程。新协程继承创建者的
-hook。`stop()` 会先移除所有线程上的 cluacov hook，再固定报告数据；
+包括已挂起的协程及 `coroutine.wrap` 闭包持有的协程。Lua 5.4 上有一个例外：
+ltask 等宿主用 `lua_resume` 驱动主线程，若带 hook 的主线程挂起时关闭状态，
+Lua 5.4 会中止所有 `__gc` 终结器，因此这类主线程只在由它自己调用 `start()`
+时安装 hook。Lua 5.5 不受影响，始终给主线程安装 hook。若宿主直接在被
+resume 的主线程上调用 `start()`，采集照常，但依赖终结器的退出落盘可能不生效；
+请在关闭状态前显式保存（例如 `runner.save_stats()`）或使用 tick 模式。
+新协程继承创建者的 hook。`stop()` 会先移除所有线程上的 cluacov hook，再固定报告数据；
 若其他工具已经替换某个线程的 hook，则保留该替代 hook。
 这些操作不替换 `coroutine.create`、`wrap` 或 `resume`。
 

@@ -298,8 +298,14 @@ Calling `start()` again while the hook is already active is a no-op. Calling
 
 Collection applies to the whole Lua state: `start()` installs the hook on
 the main thread and all existing coroutines, including suspended threads
-and threads held by `coroutine.wrap` closures. New coroutines inherit their
-creator's hook. `stop()` removes cluacov's hook from every thread before
+and threads held by `coroutine.wrap` closures. One exception on Lua 5.4: hosts
+such as ltask drive the main thread with `lua_resume`, and Lua 5.4 aborts
+every `__gc` finalizer if the state is closed while a hooked main thread is
+suspended, so such a main thread is hooked only when it calls `start()`
+itself. Lua 5.5 is not affected and always hooks the main thread. If such a
+host calls `start()` on the resumed main thread itself, collection works but
+finalizer-based shutdown may not write reports; save explicitly (for example
+`runner.save_stats()`) or use tick mode before the state is closed. New coroutines inherit their creator's hook. `stop()` removes cluacov's hook from every thread before
 freezing the reports; it preserves hooks replaced by another tool.
 Neither operation replaces `coroutine.create`, `wrap`, or `resume`.
 Only instructions executed while collection is active are recorded.

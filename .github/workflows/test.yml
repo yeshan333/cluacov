@@ -52,4 +52,8 @@ jobs:
 
     - name: Reject incompatible state layouts before taking ownership of hooks
       if: matrix.os == 'ubuntu-latest' && (matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5')
-      run: python3 spec/check_state_layout.py --include "$(luarocks config variables.LUA_INCDIR)"
+      run: python3 spec/native/check_state_layout.py --include "$(luarocks config variables.LUA_INCDIR)"
+
+    - name: Keep finalizers when closing a state with a suspended main thread
+      if: matrix.os == 'ubuntu-latest' && (matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5')
+      run: python3 spec/native/check_suspended_main.py --include "$(luarocks config variables.LUA_INCDIR)"

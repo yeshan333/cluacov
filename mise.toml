@@ -54,7 +54,7 @@ depends = ["test:all", "e2e:all"]
 # library loaded in the process, so the .so files are not self-sufficient
 # — we LD_PRELOAD libasan when running the test binaries.
 #
-# The LSan suppressions file at spec/asan_lsan_suppressions.txt filters
+# The LSan suppressions file at spec/asan/asan_lsan_suppressions.txt filters
 # out leaks coming from third-party binaries (gcc, bash, sort, etc.) that
 # get spawned as subprocesses of busted / e2e runners and inherit the
 # preload. It does NOT suppress anything inside cluacov.
@@ -77,7 +77,7 @@ fi
 # Positive control: prove LSan is functional in this environment BEFORE
 # we declare a clean cluacov run "no leaks". A clean run with broken
 # LSan would be a silent false negative.
-./spec/asan_lsan_canary.sh
+./spec/asan/asan_lsan_canary.sh
 
 # Install busted into the local --tree=. against THIS interpreter, for
 # the same reason asan:55 does it: avoid an ABI-mismatch SEGV from a
@@ -101,7 +101,7 @@ eval "$(luarocks --lua-version=5.4 --tree=. path)"
 # (vs SIGABRT) so busted/genhtml can still drain output cleanly.
 export ASAN_OPTIONS="abort_on_error=0:detect_leaks=1:print_stacktrace=1"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
-export LSAN_OPTIONS="suppressions=$PWD/spec/asan_lsan_suppressions.txt:print_suppressions=1"
+export LSAN_OPTIONS="suppressions=$PWD/spec/asan/asan_lsan_suppressions.txt:print_suppressions=1"
 export LD_PRELOAD="$ASAN_LIB"
 
 # Use the locally-installed busted so its shebang points at THIS run\\047s
@@ -127,7 +127,7 @@ if [ ! -e "$ASAN_LIB" ]; then
 fi
 
 # Positive control: prove LSan is functional before claiming "no leaks".
-./spec/asan_lsan_canary.sh
+./spec/asan/asan_lsan_canary.sh
 
 # Install busted into the local --tree=. against the 5.5 interpreter.
 # A globally-installed busted under a different Lua version embeds a
@@ -147,7 +147,7 @@ eval "$(luarocks --lua-version=5.5 --tree=. path)"
 # halt_on_error=1 (default) is REQUIRED: see asan:54 for rationale.
 export ASAN_OPTIONS="abort_on_error=0:detect_leaks=1:print_stacktrace=1"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
-export LSAN_OPTIONS="suppressions=$PWD/spec/asan_lsan_suppressions.txt:print_suppressions=1"
+export LSAN_OPTIONS="suppressions=$PWD/spec/asan/asan_lsan_suppressions.txt:print_suppressions=1"
 export LD_PRELOAD="$ASAN_LIB"
 
 # Use the locally-installed busted so its shebang points at THIS run\\047s
@@ -174,7 +174,7 @@ depends = ["asan:54", "asan:55"]
 # - LD_PRELOAD propagates into subprocesses that busted / e2e spawn via
 #   io.popen / os.execute (gcc, /bin/bash, /usr/bin/sort, ...). Those
 #   third-party tools have their own small at-exit leaks; we filter them
-#   out via spec/asan_lsan_suppressions.txt. The suppressions DO NOT
+#   out via spec/asan/asan_lsan_suppressions.txt. The suppressions DO NOT
 #   match anything in cluacov's own code.
 #
 # - asan:55 needs busted installed into the local --tree=. so that

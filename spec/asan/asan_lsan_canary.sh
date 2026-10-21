@@ -12,7 +12,7 @@
 # failure.
 #
 # Usage:
-#   spec/asan_lsan_canary.sh
+#   spec/asan/asan_lsan_canary.sh
 
 set -eu
 

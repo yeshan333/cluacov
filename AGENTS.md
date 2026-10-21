@@ -4,7 +4,7 @@
 
 `src/cluacov/` contains the shipped Lua modules and C extensions. Core modules include `deepbranches.c`, `deepactivelines.c`, `hook.c`, `pchook.c`, `branchcov.lua`, `branchfilter.lua`, and `runner.lua`. Version-specific Lua and LuaJIT headers live under `src/cluacov/lua5*/` and `src/cluacov/lj*/`.
 
-Unit tests are in `spec/*_spec.lua`. End-to-end coverage scenarios are in `e2e/`, with generated reports under `e2e/output/`. Documentation and diagrams live in `docs/`; benchmark tooling is in `bench/`. LuaRocks packaging is defined by `cluacov-dev-1.rockspec` and release rockspecs in `rockspecs/`.
+Unit tests are in `spec/*_spec.lua`. Checks that compile a C host or helper against the Lua headers live in `spec/native/` (Python, run by CI on Ubuntu 5.4/5.5); ASan/LSan helpers live in `spec/asan/`. End-to-end coverage scenarios are in `e2e/`, with generated reports under `e2e/output/`. Documentation and diagrams live in `docs/`; benchmark tooling is in `bench/`. LuaRocks packaging is defined by `cluacov-dev-1.rockspec` and release rockspecs in `rockspecs/`.
 
 ## Build, Test, and Development Commands
 
@@ -16,7 +16,7 @@ Unit tests are in `spec/*_spec.lua`. End-to-end coverage scenarios are in `e2e/`
 - `mise run test:all`: builds and runs unit tests on both Lua 5.4 and 5.5.
 - `mise run e2e:54` / `mise run e2e:55`: builds into the repo-local tree and runs all e2e scenarios. The scripts auto-detect the current Lua version.
 - `mise run check`: full build + unit + E2E on both versions.
-- `mise run asan:54` / `mise run asan:55` / `mise run asan:all`: rebuild C extensions with `-fsanitize=address,undefined`, `LD_PRELOAD` libasan, and run unit + E2E under ASan/UBSan/LSan. Linux + gcc only. Each task starts with `spec/asan_lsan_canary.sh` as a positive control to prove LSan is live before declaring "no leaks". See `CONTRIBUTING.md` for details.
+- `mise run asan:54` / `mise run asan:55` / `mise run asan:all`: rebuild C extensions with `-fsanitize=address,undefined`, `LD_PRELOAD` libasan, and run unit + E2E under ASan/UBSan/LSan. Linux + gcc only. Each task starts with `spec/asan/asan_lsan_canary.sh` as a positive control to prove LSan is live before declaring "no leaks". See `CONTRIBUTING.md` for details.
 
 Agents should follow the local instruction in `@/Users/yeshan333/.codex/RTK.md`: prefix shell commands with `rtk`, for example `rtk busted -o htest`.
 

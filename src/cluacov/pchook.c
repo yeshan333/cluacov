@@ -434,8 +434,30 @@ static void aggregate_all_hits(lua_State *L, int result_idx);
 static void aggregate_all_line_hits(lua_State *L, int result_idx);
 
 /*
- * Install/remove the hook on every existing thread, including coroutine.wrap
- * threads hidden in C closures and threads resumed through cached/C APIs.
+ * Hosts such as ltask lua_resume the main thread, which makes it yieldable.
+ * Closed while it is suspended with a count/line hook, Lua 5.4 aborts every
+ * finalizer, so there such a main thread is hooked only when it calls start.
+ * Lua 5.5 runs finalizers normally and keeps the hook.
+ */
+static int skip_main_thread(lua_State *L, lua_State *thread) {
+#if LUA_VERSION_NUM == 504
+    lua_State *main_thread;
+
+    lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+    main_thread = lua_tothread(L, -1);
+    lua_pop(L, 1);
+    return thread == main_thread && thread != L && lua_isyieldable(thread);
+#else
+    (void)L;
+    (void)thread;
+    return 0;
+#endif
+}
+
+/*
+ * Install/remove the hook on every existing thread (see skip_main_thread),
+ * including coroutine.wrap threads hidden in C closures and threads resumed
+ * through cached/C APIs.
  * New threads inherit the hook from their creator (lua_newthread).
  *
  * This pass only reads the GC list and calls lua_gethook/lua_sethook, which
@@ -448,6 +470,9 @@ static void set_thread_hooks(lua_State *L, int mask) {
         if (object->tt == LUA_VTHREAD) {
             lua_State *thread = (lua_State *)object;
             if (mask != 0) {
+                if (skip_main_thread(L, thread)) {
+                    continue;
+                }
                 lua_sethook(thread, pc_hook, mask, 1);
             } else if (lua_gethook(thread) == pc_hook) {
                 /* Leave hooks installed by somebody else after start alone. */
