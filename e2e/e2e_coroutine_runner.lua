@@ -22,7 +22,7 @@ end
 
 local function execute(command)
    local ok, kind, code = os.execute(command)
-   assert(ok == true and kind == "exit" and code == 0,
+   assert(ok == 0 or (ok == true and kind == "exit" and code == 0),
       string.format("command failed (%s %s): %s", tostring(kind), tostring(code), command))
 end
 
@@ -206,6 +206,19 @@ assert(coroutine.status(co) == "dead")
       branches = { 0, 0 },
    },
 }
+
+if not coroutine.close then
+   -- LuaJIT has no explicit close; exercise collection of an abandoned thread.
+   cases[#cases].id = "abandon"
+   cases[#cases].name = "collecting a suspended coroutine leaves its unresumed branches uncovered"
+   cases[#cases].workload = [[
+local co = coroutine.create(target.exchange)
+assert(select(2, coroutine.resume(co)) == "request")
+co = nil
+collectgarbage("collect")
+collectgarbage("collect")
+]]
+end
 
 local function check_report(directory, case)
    local lines, branches = {}, {}
