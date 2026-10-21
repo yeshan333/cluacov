@@ -42,7 +42,7 @@ source line. It cross-references line hits with static branch discovery
 filters out branches whose targets share the same source line, which cannot
 be distinguished at line granularity.
 
-### New approach (Lua 5.4+ only)
+### New approach (Lua 5.4+ and LuaJIT 2.1)
 
 ![New architecture](docs/arch-new.png)
 
@@ -63,5 +63,10 @@ periodically and also flushes at normal process exit.
 | **Granularity** | Per source line | Per bytecode instruction (PC) |
 | **Compound conditions** | Blind: `if a or b or c` = 1 hit | Each TEST instruction counted |
 | **Lua 5.1–5.3** | Supported | Not supported |
-| **LuaJIT** | Supported | Not supported |
+| **LuaJIT 2.1** | Supported | Supported (JIT paused during collection) |
 | **Performance** | Moderate | Measure with edge tracking; [historical benchmarks](docs/benchmark.md) predate it |
+
+On LuaJIT 2.1, use `luajit -lcluacov.runner your_script.lua` for line,
+function, and branch coverage. The collector flushes existing traces and pauses
+JIT compilation while active, then restores the original JIT state on `stop()`.
+See [LuaJIT details](docs/branch-coverage.md#luajit-21) for lifecycle and hook limits.

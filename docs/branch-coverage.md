@@ -14,7 +14,7 @@ branch records (`BRDA`).
 |------|-----------------|-------------|
 | `test` | `if`, `elseif`, `and`, `or`, comparisons | Conditional test followed by a jump |
 | `loop` | `for i = a, b` (loop back edge) | Numeric for loop continuation check |
-| `loop-entry` | `for i = a, b` (entry, Lua >= 5.4) | Numeric for loop initial entry check |
+| `loop-entry` | `for i = a, b` (entry, Lua >= 5.4 or LuaJIT) | Numeric for loop initial entry check |
 | `iterator` | `for k, v in f()` | Generic for iterator exhaustion check |
 
 Each branch site has exactly **two targets**: the two possible execution paths.
@@ -125,7 +125,7 @@ This naturally handles:
 > **Why not instruction-level coverage with this approach?** C/gcov inserts
 > arc counters at compile time, tracking every branch instruction individually.
 > Lua's line-level debug hook makes same-line instructions indistinguishable.
-> For true per-instruction coverage on Lua 5.4+, use
+> For true per-instruction coverage on Lua 5.4+ or LuaJIT 2.1, use
 > [pchook](#per-pc-branch-coverage-cluacovpchook--cluacovbranchcov).
 
 ### Reading branch coverage in HTML reports
@@ -260,7 +260,7 @@ This script:
 | PUC-Rio Lua 5.3 | Yes | No | Same as 5.2 |
 | PUC-Rio Lua 5.4 | Yes | Yes | `OP_FORPREP` conditional, `sJ` format jumps |
 | PUC-Rio Lua 5.5 | Yes | Yes | Same as 5.4 |
-| LuaJIT | No | No | Returns empty table (bytecode format differs) |
+| LuaJIT 2.1 | Yes | Yes | Tests, numeric loops, generic iterators, and assert calls |
 
 ## Per-PC Branch Coverage (`cluacov.pchook` + `cluacov.branchcov`)
 
@@ -320,7 +320,7 @@ after start only avoids interfering with its owner; it does not enable
 simultaneous collection. That thread and children inheriting its replacement
 hook may have missing coverage.
 
-At module load, the collector checks the allocator and registry against Lua's
+On PUC-Rio Lua, at module load the collector checks the allocator and registry against Lua's
 public API, then validates the GC list head using a new coroutine. A detected
 mismatch raises an error before list traversal or hook installation. This is
 not a complete ABI compatibility guarantee: reading `lua_State.l_G` still
@@ -419,7 +419,7 @@ before closing that state, as described above; finalizers may not run there.
 
 ### Requirements
 
-- **Lua 5.4+** required (accesses `CallInfo.u.l.savedpc` via vendored headers)
+- **Lua 5.4+ or LuaJIT 2.1** required (uses vendored VM headers)
 - The function passed to `get_hits` must be the **same object** that was
   executed under `pchook.start()`
 - Coroutines created before or after `pchook.start()` contribute coverage
@@ -427,4 +427,35 @@ before closing that state, as described above; finalizers may not run there.
 - Each thread has one debug hook. Replacing it with another collector or
   debugger during collection interrupts coverage on that thread.
 - Lua 5.1–5.3: `pchook.start()` raises an error; `get_hits()` returns empty
-- LuaJIT: same as 5.1–5.3
+- LuaJIT 2.1: instruction-level collection via `cluacov.runner`
+
+
+### LuaJIT 2.1
+
+Run `luajit -lcluacov.runner script.lua`, or use the same `pchook` and
+`branchcov` APIs shown above. Comparisons, truthiness tests, short-circuit
+expressions, numeric loop entry/backedges, generic iterators (including the
+specialized `pairs`/`next` bytecode), and non-tail `assert` calls are supported.
+A PC identifies a 1-based executable bytecode slot, excluding the function header.
+
+`start()` flushes compiled traces and pauses the JIT engine, so code warmed up
+before collection cannot bypass the instruction hook. `stop()` restores the
+engine's original enabled/disabled state; flushed traces will be rebuilt later.
+Do not call `jit.on()` during collection. `deepbranches.get()` also flushes
+traces belonging to the inspected function tree when needed to recover original
+jump operands; it does not change whether JIT compilation is enabled.
+
+LuaJIT has one hook for the entire VM. Replacing it from any coroutine replaces
+it for every thread. The collector takes exclusive ownership on start and does
+not restore preexisting debug hooks. It preserves hooks installed by another
+tool after start, but coverage after that replacement is incomplete.
+
+LuaJIT forbids switching JIT modes inside `__gc`. When `stop()` runs in a
+finalizer, it still freezes statistics and the runner writes the final report;
+JIT restoration is deferred until an ordinary `stop()` call, if the process
+continues. This also covers short tick-mode programs that exit before saving.
+
+The LuaJIT adapter uses the existing vendored 2.1 object layouts, with bytecode
+and frame headers from upstream commit `7152e15489d2077cd299ee23e3d51a4c599ab14f`
+(rolling 2.1) and `8271c643c21d1b2f344e339f559f2de6f3663191` (2.1.0-beta3).
+Custom LuaJIT forks with incompatible object/frame layouts need matching headers.

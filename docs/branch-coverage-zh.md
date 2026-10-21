@@ -13,7 +13,7 @@
 |------|---------|------|
 | `test` | `if`、`elseif`、`and`、`or`、比较运算 | 条件判断后跳转 |
 | `loop` | `for i = a, b`（循环回边） | 数值 for 循环的继续/退出判断 |
-| `loop-entry` | `for i = a, b`（入口，Lua >= 5.4） | 数值 for 循环的初始入口判断 |
+| `loop-entry` | `for i = a, b`（入口，Lua >= 5.4 或 LuaJIT） | 数值 for 循环的初始入口判断 |
 | `iterator` | `for k, v in f()` | 泛型 for 迭代器的耗尽判断 |
 
 每个分支站点恰好有**两个目标**：两条可能的执行路径。
@@ -113,7 +113,7 @@ Lua 的**行级调试钩子**在每个源码行触发一次。当一行源码包
 
 > **为什么这种方式无法做指令级覆盖率？** C/gcov 在编译时插入弧计数器，可以逐条跟踪
 > 每个分支指令。Lua 的行级调试钩子使得同一行的指令在运行时无法区分。若需真正的
-> 指令级覆盖率（Lua 5.4+），请使用
+> 指令级覆盖率（Lua 5.4+ 或 LuaJIT 2.1），请使用
 > [pchook](#指令级分支覆盖率cluacovpchook--cluacovbranchcov)。
 
 ### 如何阅读 HTML 报告中的分支覆盖率
@@ -243,7 +243,7 @@ lua e2e/e2e_branch_coverage.lua
 | PUC-Rio Lua 5.3 | 支持 | 不支持 | 同 5.2 |
 | PUC-Rio Lua 5.4 | 支持 | 支持 | `OP_FORPREP` 条件化，`sJ` 格式跳转 |
 | PUC-Rio Lua 5.5 | 支持 | 支持 | 同 5.4 |
-| LuaJIT | 不支持 | 不支持 | 返回空表（字节码格式不同） |
+| LuaJIT 2.1 | 支持 | 支持 | 条件判断、数值循环、泛型迭代和 assert 调用 |
 
 ## 指令级分支覆盖率（`cluacov.pchook` + `cluacov.branchcov`）
 
@@ -382,11 +382,36 @@ Tick 模式会周期保存，并在自然退出或 `os.exit()` 时最终保存�
 
 ### 要求
 
-- 需要 **Lua 5.4+**（通过 vendored 头文件访问 `CallInfo.u.l.savedpc`）
+- 需要 **Lua 5.4+ 或 LuaJIT 2.1**（使用仓库内的 VM 头文件）
 - 传给 `get_hits` 的函数必须是在 `pchook.start()` 下**实际执行**过的同一对象
 - `pchook.start()` 前后创建的协程，都能记录采集期间执行的代码。
   启动前已经执行过的代码不会补记。
 - 每个线程只有一个调试 hook；采集期间若被其他采集器或调试器替换，
   该线程的覆盖率采集会中断。
 - Lua 5.1–5.3：`pchook.start()` 会报错；`get_hits()` 返回空表
-- LuaJIT：同 5.1–5.3
+- LuaJIT 2.1：通过 `cluacov.runner` 采集指令级覆盖率
+
+
+### LuaJIT 2.1
+
+使用 `luajit -lcluacov.runner script.lua`，或调用前文相同的 `pchook`、
+`branchcov` API。支持比较、真假判断、短路表达式、数值循环入口与回跳、
+泛型迭代（包括 `pairs`/`next` 优化字节码）及非尾调用形式的 `assert`。
+PC 从第一条可执行指令的 1 开始，不包含函数头指令。
+
+`start()` 会清空已有 trace 并暂停 JIT，防止预热后的机器码绕过逐指令 hook。
+`stop()` 恢复启动前 JIT 的开关状态；已清空的 trace 后续会重新编译。
+采集期间不要调用 `jit.on()`。`deepbranches.get()` 若发现被检查的函数树有 trace，
+也会清除它们以还原跳转参数，但不会改变 JIT 开关状态。
+
+LuaJIT 的 hook 属于整个 VM。在任意协程中替换 hook 都会影响全部线程。
+采集器启动时接管 hook，停止时不恢复启动前的 hook；对于启动后其他工具安装的
+hook 则予以保留，但替换后的覆盖率数据不完整。
+
+LuaJIT 禁止在 `__gc` 内切换 JIT 状态。因此在终结器里调用 `stop()` 时，
+仍会冻结统计并写出报告，但 JIT 恢复会延后到普通上下文中的下一次 `stop()`。
+短程序在第一次 tick 保存前退出也会写出最终报告。
+
+适配器使用仓库内的 LuaJIT 2.1 对象布局及对应字节码、栈帧头文件；具体上游版本
+见[英文说明](branch-coverage.md#luajit-21)。修改过对象或栈帧布局的 LuaJIT 分支
+需要使用与运行时匹配的头文件。

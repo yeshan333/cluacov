@@ -4,6 +4,13 @@
 
 ### Added
 
+- Add LuaJIT 2.1 instruction-level branch, function, and line coverage via
+  `cluacov.runner`, including compiled-before-start code, specialized iterators,
+  recursive calls, and coroutines. Collection pauses JIT and restores its prior
+  state on stop; finalizer shutdown still writes reports.
+- Run the shared regression contracts and LuaJIT-specific scenarios in CI,
+  including the sanitizer workflow.
+
 - `cluacov.pchook` and `cluacov.branchcov` now support per-PC,
   instruction-level branch coverage on PUC-Rio Lua 5.4 and 5.5.
 - Added runtime coverage / branch metadata tests plus end-to-end
