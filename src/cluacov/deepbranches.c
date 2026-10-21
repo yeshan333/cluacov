@@ -474,8 +474,12 @@ static int l_deepbranches(lua_State *L) {
 
 #ifndef PUCRIOLUA
     /* Restore original branch operands overwritten by compiled trace IDs. */
-    if (proto_has_trace(get_proto(L)))
+    if (proto_has_trace(get_proto(L))) {
+        if (G(L)->hookmask & HOOK_GC)
+            return luaL_error(L, "cannot analyze traced LuaJIT functions inside __gc; "
+                              "analyze before finalization");
         luaJIT_setmode(L, 1, LUAJIT_MODE_ALLFUNC | LUAJIT_MODE_FLUSH);
+    }
 #endif
     add_branches(L, get_proto(L), result_index, &count, "0");
 
@@ -483,6 +487,9 @@ static int l_deepbranches(lua_State *L) {
 }
 
 int luaopen_cluacov_deepbranches(lua_State *L) {
+#ifndef PUCRIOLUA
+    check_luajit_layout(L);
+#endif
     lua_newtable(L);
     lua_pushliteral(L, "1.0.0");
     lua_setfield(L, -2, "version");

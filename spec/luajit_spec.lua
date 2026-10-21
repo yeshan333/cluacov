@@ -33,6 +33,60 @@ describe("LuaJIT branch coverage", function()
       return { site.targets[1].hits, site.targets[2].hits }
    end
 
+   it("preserves stopped snapshots and tick settings when a finalizer tries to start collection", function()
+      local func = compile("return function(x) if x then return 1 end return 2 end")
+      pchook.start()
+      func(true)
+      pchook.stop()
+      local before = pchook.get_all_hits()
+      local config = { savestepsize = 10, save_stats = function() end }
+      local ok, err
+      do
+         local u = newproxy(true)
+         getmetatable(u).__gc = function() ok, err = pcall(pchook.start, config) end
+      end
+      collectgarbage("collect")
+      collectgarbage("collect")
+      assert.is_false(ok)
+      assert.matches("cannot run inside a LuaJIT __gc", err, 1, true)
+      assert.is_nil(config.steps)
+      assert.same(before, pchook.get_all_hits())
+      pchook.start()
+      func(false)
+      pchook.stop()
+      assert.equal(2, pchook.get_hits(func)[1].calls)
+      assert.equal("covered", branch(func, "test").status)
+   end)
+
+   it("explains traced-function analysis failure in a finalizer and succeeds afterwards", function()
+      jit.on()
+      jit.flush()
+      local func = compile("return function(n) local s=0 for i=1,n do s=s+i end return s end")
+      for _ = 1, 100 do func(100) end
+      assert.is_table(require("jit.util").traceinfo(1))
+      local ok, err
+      do
+         local u = newproxy(true)
+         getmetatable(u).__gc = function() ok, err = pcall(deepbranches.get, func) end
+      end
+      collectgarbage("collect")
+      collectgarbage("collect")
+      assert.is_false(ok)
+      assert.matches("cannot analyze traced LuaJIT functions inside __gc", err, 1, true)
+      assert.equal(2, #deepbranches.get(func))
+      assert.is_true(jit.status())
+   end)
+
+   it("keeps exact branch and call counts through 4000 non-tail recursive frames", function()
+      local func = compile("local function f(n) if n==0 then return 0 end return 1+f(n-1) end return f")
+      pchook.start()
+      local result = func(4000)
+      pchook.stop()
+      assert.equal(4000, result)
+      assert.equal(4001, pchook.get_hits(func)[1].calls)
+      assert.same({ 1, 4000 }, counts(branch(func, "test")))
+   end)
+
    it("distinguishes literal table values while matching separately loaded copies", function()
       local source = "return function() local t={value=1, [true]='yes', 10, 20}; return t end, "
          .. "function() local t={value=2, [true]='yes', 10, 20}; return t end"

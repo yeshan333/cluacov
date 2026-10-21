@@ -18,6 +18,7 @@
 #else
 #error unsupported LuaJIT version
 #endif
+#include "ljlayout.h"
 
 typedef GCproto Proto;
 #define proto_code_count(p) ((int)(p)->sizebc - 1)

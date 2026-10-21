@@ -58,6 +58,10 @@ jobs:
       if: matrix.os == 'ubuntu-latest' && (matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5')
       run: python3 spec/native/check_state_layout.py --include "$(luarocks config variables.LUA_INCDIR)"
 
+    - name: Reject incompatible LuaJIT GC64 layouts and handle minimal hosts
+      if: matrix.os == 'ubuntu-latest' && matrix.luaVersion == 'luajit'
+      run: python3 spec/native/check_luajit_layout.py --include "$(luarocks config variables.LUA_INCDIR)"
+
     - name: Keep finalizers when closing a state with a suspended main thread
       if: matrix.os == 'ubuntu-latest' && (matrix.luaVersion == '5.4' || matrix.luaVersion == '5.5')
       run: python3 spec/native/check_suspended_main.py --include "$(luarocks config variables.LUA_INCDIR)"

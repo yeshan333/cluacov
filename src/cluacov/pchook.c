@@ -298,11 +298,25 @@ static void push_frames(lua_State *L) {
 static void record_transition(lua_State *L, int entry, const void *ci, int pc) {
     int previous;
     push_frames(L);
+#ifdef PUCRIOLUA
     lua_rawgetp(L, -1, ci);
+#else
+    lua_rawgeti(L, -1, (int)(uintptr_t)ci);
+#endif
     previous = (int)lua_tointeger(L, -1);
     lua_pop(L, 1);
     lua_pushinteger(L, pc);
+#ifdef PUCRIOLUA
     lua_rawsetp(L, -2, ci);
+#else
+    lua_rawseti(L, -2, (int)(uintptr_t)ci);
+    lua_rawgeti(L, -1, 0);
+    if (lua_tointeger(L, -1) < (lua_Integer)(uintptr_t)ci) {
+        lua_pop(L, 1);
+        lua_pushinteger(L, (lua_Integer)(uintptr_t)ci);
+        lua_rawseti(L, -2, 0);
+    } else lua_pop(L, 1);
+#endif
     lua_pop(L, 1);
     if (previous > 0) {
         lua_Integer count;
@@ -369,21 +383,24 @@ static void pc_hook(lua_State *L, lua_Debug *ar) {
             /* FUNCV relocates vararg frames after the call event. Clear
              * abandoned deeper offsets too: an error has no return event,
              * and a later call can reuse its relocated stack slots. */
-            if (ar->event == LUA_HOOKCALL) {
-                lua_pushnil(L);
-                while (lua_next(L, -2) != 0) {
-                    uintptr_t frame = (uintptr_t)lua_touserdata(L, -2);
-                    lua_pop(L, 1);
-                    if (frame >= (uintptr_t)ci) {
-                        lua_pushvalue(L, -1);
-                        lua_pushnil(L);
-                        lua_rawset(L, -4);
-                    }
+            {
+                int offset, maximum;
+                lua_rawgeti(L, -1, 0);
+                maximum = (int)lua_tointeger(L, -1);
+                lua_pop(L, 1);
+                for (offset = (int)(uintptr_t)ci; offset <= maximum; offset++) {
+                    lua_pushnil(L);
+                    lua_rawseti(L, -2, offset);
+                }
+                if (maximum >= (int)(uintptr_t)ci) {
+                    lua_pushinteger(L, (int)(uintptr_t)ci - 1);
+                    lua_rawseti(L, -2, 0);
                 }
             }
-#endif
+#else
             lua_pushnil(L);
             lua_rawsetp(L, -2, ci);
+#endif
             lua_pop(L, 1);
             if (ar->event == LUA_HOOKRET) return;
         }
@@ -486,18 +503,29 @@ static void set_thread_hooks(lua_State *L, int mask) {
 static void cache_jit_status(lua_State *L) {
     /* Cache the supported API before applications sandbox their globals. */
     lua_getfield(L, LUA_REGISTRYINDEX, "_LOADED");
-    if (!lua_istable(L, -1)) luaL_error(L, "pchook requires the jit library");
+    if (!lua_istable(L, -1)) { lua_pop(L, 1); return; }
     lua_getfield(L, -1, "jit");
-    if (!lua_istable(L, -1)) luaL_error(L, "pchook requires the jit library");
+    if (!lua_istable(L, -1)) { lua_pop(L, 2); return; }
     lua_getfield(L, -1, "status");
-    if (!lua_isfunction(L, -1)) luaL_error(L, "pchook requires jit.status");
+    if (!lua_isfunction(L, -1)) { lua_pop(L, 3); return; }
     lua_rawsetp(L, LUA_REGISTRYINDEX, &JIT_STATUS_KEY);
     lua_pop(L, 2);
 }
 
+static void push_jit_status(lua_State *L) {
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &JIT_STATUS_KEY);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        cache_jit_status(L);
+        lua_rawgetp(L, LUA_REGISTRYINDEX, &JIT_STATUS_KEY);
+    }
+    if (!lua_isfunction(L, -1))
+        luaL_error(L, "pchook.start requires the jit library to preserve JIT state");
+}
+
 static void suspend_jit(lua_State *L) {
     /* Avoid depending on either mutable globals or the jit_State ABI. */
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &JIT_STATUS_KEY);
+    push_jit_status(L);
     lua_call(L, 0, 1);
     lua_rawsetp(L, LUA_REGISTRYINDEX, &JIT_RESTORE_KEY);
     luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF);
@@ -536,6 +564,14 @@ static int l_start(lua_State *L) {
         return 0;
     }
     lua_pop(L, 1);
+
+#ifndef PUCRIOLUA
+    /* Reject before changing snapshots, tick configuration or restore state. */
+    if (G(L)->hookmask & HOOK_GC)
+        return luaL_error(L, "pchook.start cannot run inside a LuaJIT __gc finalizer");
+    push_jit_status(L);
+    lua_pop(L, 1);
+#endif
 
     /* Clear stale snapshots from previous stop(). */
     lua_pushnil(L);
@@ -1172,6 +1208,7 @@ int luaopen_cluacov_pchook(lua_State *L) {
 #if defined(PUCRIOLUA) && LUA_VERSION_NUM >= 504
     check_state_layout(L);
 #elif !defined(PUCRIOLUA)
+    check_luajit_layout(L);
     cache_jit_status(L);
 #endif
     lua_newtable(L);

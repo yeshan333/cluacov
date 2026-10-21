@@ -30,6 +30,7 @@
 #else
 #error unsupported LuaJIT version
 #endif
+#include "ljlayout.h"
 #endif
 
 #ifdef PUCRIOLUA
@@ -229,6 +230,9 @@ static int l_deepactivelines(lua_State *L) {
 }
 
 int luaopen_cluacov_deepactivelines(lua_State *L) {
+#ifndef PUCRIOLUA
+    check_luajit_layout(L);
+#endif
     lua_newtable(L);
     lua_pushliteral(L, "0.1.4");
     lua_setfield(L, -2, "version");
