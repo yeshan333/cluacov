@@ -33,8 +33,8 @@ describe("pchook", function()
 
    local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
 
-   if jit or lua_version < 5.4 then
-      pending("pchook requires PUC-Rio Lua 5.4+")
+   if not jit and lua_version < 5.4 then
+      pending("pchook requires PUC-Rio Lua 5.4+ or LuaJIT 2.1")
    else
       describe("version", function()
          it("is a string in MAJOR.MINOR.PATCH format", function()
@@ -87,7 +87,7 @@ end
             assert.same({ true, "marked" }, { coroutine.resume(co) })
             pchook.stop()
             assert.equal(2, pchook.get_line_hits(mark)[1])
-            assert.is_true(coroutine.close(co))
+            if coroutine.close then assert.is_true(coroutine.close(co)) end
          end)
 
          it("starting and stopping from a coroutine also controls the main thread and siblings", function()
@@ -111,6 +111,7 @@ end
             assert.equal(1, pchook.get_line_hits(main_mark)[1])
          end)
 
+         if not jit then -- LuaJIT has one VM-wide hook; covered in luajit_spec.
          it("stops inherited coroutine hooks but preserves hooks installed by another tool", function()
             pchook.start()
             local inherited = coroutine.create(function() return 1 end)
@@ -142,6 +143,8 @@ end
             assert.same(hits, pchook.get_line_hits(body))
          end)
 
+         end
+
          it("runs tick callbacks and records hits in a coroutine created before start", function()
             local body = load_function([[
 return function()
@@ -166,9 +169,9 @@ end
             assert.equal(1, pchook.get_line_hits(body)[2])
          end)
 
-         for _, mode in ipairs({ "incremental", "generational" }) do
+         for _, mode in ipairs(jit and { "incremental" } or { "incremental", "generational" }) do
             it("collects preexisting coroutines across " .. mode .. " GC without retaining dead threads", function()
-               local old_mode = collectgarbage(mode)
+               local old_mode = not jit and collectgarbage(mode)
                local ok, err = pcall(function()
                   local mark = load_function("return function() return 'collected' end")
                   local live = coroutine.create(mark)
@@ -186,7 +189,7 @@ end
                   assert.equal(1, pchook.get_line_hits(mark)[1])
                end)
                pchook.stop()
-               collectgarbage(old_mode)
+               if old_mode then collectgarbage(old_mode) end
                assert.is_true(ok, tostring(err))
             end)
          end
@@ -1076,9 +1079,10 @@ end
             -- Line 3 "local i = 0" must be > 0 (size was called in loads 1 & 3)
             assert.is_true((data[3] or 0) > 0,
                "first line of size() must be hit (line 3)")
-            -- Line 6 "end" of for loop must be > 0
-            assert.is_true((data[6] or 0) > 0,
-               "for-loop end must be hit (line 6)")
+            -- LuaJIT attributes the iterator test to the for line, PUC to end.
+            local loop_line = jit and 4 or 6
+            assert.is_true((data[loop_line] or 0) > 0,
+               "iterator test must be hit")
             -- Line 7 "return i" must be > 0
             assert.is_true((data[7] or 0) > 0,
                "return in size() must be hit (line 7)")

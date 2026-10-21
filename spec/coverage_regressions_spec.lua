@@ -4,8 +4,8 @@ local branchcov = require "cluacov.branchcov"
 local load = loadstring or load -- luacheck: compat
 
 describe("coverage across function identities and call frames", function()
-   if jit or tonumber(_VERSION:match("(%d+%.%d+)")) < 5.4 then
-      pending("requires PUC-Rio Lua 5.4+")
+   if not jit and tonumber(_VERSION:match("(%d+%.%d+)")) < 5.4 then
+      pending("requires PUC-Rio Lua 5.4+ or LuaJIT 2.1")
       return
    end
 
@@ -80,9 +80,9 @@ describe("coverage across function identities and call frames", function()
       assert.equal(1000, pchook.get_hits(func)[1].hits[1])
    end)
 
-   for _, mode in ipairs({ "incremental", "generational" }) do
+   for _, mode in ipairs(jit and { "incremental" } or { "incremental", "generational" }) do
       it("does not retain closures or their captured objects under " .. mode .. " GC", function()
-         local old_mode = collectgarbage(mode)
+         local old_mode = not jit and collectgarbage(mode)
          local ok, err = pcall(function()
             local weak = setmetatable({}, { __mode = "v" })
             pchook.start()
@@ -101,7 +101,7 @@ describe("coverage across function identities and call frames", function()
             assert.is_table(pchook.get_all_hits()["@coverage_fixture.lua"])
          end)
          pchook.stop()
-         collectgarbage(old_mode)
+         if old_mode then collectgarbage(old_mode) end
          assert.is_true(ok, tostring(err))
       end)
    end

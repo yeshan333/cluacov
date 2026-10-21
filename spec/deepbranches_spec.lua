@@ -102,13 +102,7 @@ describe("deepbranches", function()
          assert.error(function() deepbranches.get(deepbranches.get) end)
       end)
 
-      if jit then
-         it("returns an empty list on LuaJIT", function()
-            assert.same({}, deepbranches.get(function(a, b, c)
-               return a and b or c
-            end))
-         end)
-      else
+      do
          it("finds branches for if/else conditionals", function()
             local func = load_function([[
                 return function(a)
