@@ -15,8 +15,8 @@ describe("branchcov", function()
 
    local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
 
-   if jit or lua_version < 5.4 then
-      pending("branchcov requires PUC-Rio Lua 5.4+")
+   if not jit and lua_version < 5.4 then
+      pending("branchcov requires PUC-Rio Lua 5.4+ or LuaJIT 2.1")
    else
       describe("analyze", function()
          it("returns correct structure", function()

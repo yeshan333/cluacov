@@ -24,7 +24,7 @@
   </defs>
   <rect width="960" height="800" fill="#ffffff"/>
   <text x="480" y="38" text-anchor="middle" font-size="18" font-weight="600" fill="#111827">New cluacov: Per-Instruction Coverage (LUA_MASKCOUNT)</text>
-  <text x="480" y="58" text-anchor="middle" font-size="13" fill="#6b7280">Lua 5.4+ only (requires CallInfo.u.l.savedpc)</text>
+  <text x="480" y="58" text-anchor="middle" font-size="13" fill="#6b7280">Lua 5.4+ and LuaJIT 2.1 (JIT paused during collection)</text>
   <g transform="translate(0, 80)">
     <rect x="60" y="0" width="840" height="70" rx="8" ry="8" fill="#f9fafb" stroke="#d1d5db" stroke-width="1" stroke-dasharray="4,3"/>
     <text x="70" y="18" font-size="11" fill="#6b7280" font-weight="600">USER CODE</text>
@@ -33,12 +33,12 @@
   </g>
   <g transform="translate(0, 175)">
     <rect x="60" y="0" width="840" height="160" rx="8" ry="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1" stroke-dasharray="4,3"/>
-    <text x="70" y="18" font-size="11" fill="#2563eb" font-weight="600">LUA VM (5.4+)</text>
+    <text x="70" y="18" font-size="11" fill="#2563eb" font-weight="600">LUA VM (5.4+ / LuaJIT 2.1)</text>
     <rect x="100" y="30" width="340" height="110" rx="8" ry="8" fill="#ffffff" stroke="#2563eb" stroke-width="1.5" filter="url(#shadow)"/>
     <text x="270" y="52" text-anchor="middle" font-size="13" font-weight="600" fill="#111827">pchook.c: pc_hook(lua_State *L)</text>
     <text x="270" y="72" text-anchor="middle" font-size="12" fill="#6b7280">lua_sethook(L, pc_hook, LUA_MASKCOUNT, 1)</text>
     <text x="270" y="92" text-anchor="middle" font-size="12" fill="#6b7280">Fires every VM instruction (count=1)</text>
-    <text x="270" y="112" text-anchor="middle" font-size="11" fill="#9ca3af">Proto* + CallInfo.u.l.savedpc -> registry[Proto*][pc]++</text>
+    <text x="270" y="112" text-anchor="middle" font-size="11" fill="#9ca3af">Prototype + VM-specific PC -&gt; instruction / edge counts</text>
     <rect x="560" y="30" width="280" height="50" rx="6" ry="6" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.5" filter="url(#shadow)"/>
     <text x="700" y="50" text-anchor="middle" font-size="12" font-weight="600" fill="#ea580c">Tick Support (optional)</text>
     <text x="700" y="68" text-anchor="middle" font-size="11" fill="#6b7280">LUA_MASKLINE + savestepsize -> periodic save</text>
@@ -51,7 +51,7 @@
   <text x="522" y="166" text-anchor="middle" font-size="10" fill="#6b7280">execute</text>
   <g transform="translate(0, 360)">
     <rect x="60" y="0" width="840" height="100" rx="8" ry="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1" stroke-dasharray="4,3"/>
-    <text x="70" y="18" font-size="11" fill="#7c3aed" font-weight="600">STATIC ANALYSIS (same as old)</text>
+    <text x="70" y="18" font-size="11" fill="#7c3aed" font-weight="600">STATIC ANALYSIS (VM-specific bytecode)</text>
     <rect x="120" y="28" width="240" height="58" rx="8" ry="8" fill="#ffffff" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
     <text x="240" y="48" text-anchor="middle" font-size="13" font-weight="600" fill="#111827">deepbranches.c</text>
     <text x="240" y="68" text-anchor="middle" font-size="12" fill="#6b7280">Scan bytecode -&gt; branch sites</text>
@@ -67,7 +67,7 @@
     <text x="270" y="52" text-anchor="middle" font-size="13" font-weight="600" fill="#111827">branchcov.lua</text>
     <text x="270" y="74" text-anchor="middle" font-size="12" fill="#6b7280">deepbranches.get(func)</text>
     <text x="270" y="92" text-anchor="middle" font-size="12" fill="#6b7280">+ pchook.get_hits(func)</text>
-    <text x="270" y="110" text-anchor="middle" font-size="12" fill="#6b7280">-&gt; per-target branch coverage</text>
+    <text x="270" y="110" text-anchor="middle" font-size="12" fill="#6b7280">-&gt; per-edge branch coverage</text>
     <rect x="560" y="30" width="260" height="100" rx="8" ry="8" fill="#ffffff" stroke="#16a34a" stroke-width="1.5" filter="url(#shadow)"/>
     <text x="690" y="52" text-anchor="middle" font-size="13" font-weight="600" fill="#111827">runner.lua</text>
     <text x="690" y="74" text-anchor="middle" font-size="12" fill="#6b7280">pchook.get_all_line_hits()</text>
@@ -87,15 +87,15 @@
   <g transform="translate(660, 730)">
     <rect x="0" y="0" width="260" height="55" rx="6" ry="6" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
     <text x="10" y="16" font-size="11" font-weight="600" fill="#dc2626">Limitations</text>
-    <text x="10" y="32" font-size="10" fill="#6b7280">Lua 5.4+ only (not 5.1-5.3/LuaJIT)</text>
+    <text x="10" y="32" font-size="10" fill="#6b7280">No PUC Lua 5.1-5.3; LuaJIT skips __gc hooks</text>
     <text x="10" y="46" font-size="10" fill="#6b7280">Higher event volume (fires every instruction)</text>
   </g>
-  <g transform="translate(40, 485)">
-    <rect x="0" y="0" width="12" height="100" rx="3" fill="#16a34a"/>
+  <g transform="translate(60, 720)">
+    <rect x="0" y="0" width="12" height="75" rx="3" fill="#16a34a"/>
     <text x="18" y="16" font-size="10" fill="#16a34a" font-weight="600">Key difference:</text>
-    <text x="18" y="30" font-size="10" fill="#6b7280">Each branch target PC has</text>
+    <text x="18" y="30" font-size="10" fill="#6b7280">Each observed branch edge has</text>
     <text x="18" y="44" font-size="10" fill="#6b7280">its own independent hit count.</text>
-    <text x="18" y="58" font-size="10" fill="#6b7280">if a or b or c -&gt; 3 PCs,</text>
-    <text x="18" y="72" font-size="10" fill="#6b7280">3 separate counts, no filter.</text>
+    <text x="18" y="58" font-size="10" fill="#6b7280">Compound conditions keep</text>
+    <text x="18" y="72" font-size="10" fill="#6b7280">separate outcome counts.</text>
   </g>
 </svg>

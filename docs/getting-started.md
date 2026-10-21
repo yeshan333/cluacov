@@ -19,7 +19,7 @@ and coverage needs:
 | Mode | Lua version | Granularity | Setup effort |
 |---|---|---|---|
 | **Line-level** (classic) | 5.1–5.5, LuaJIT | Per source line | Minimal |
-| **Per-instruction** (new) | 5.4+ only | Per bytecode instruction | Minimal |
+| **Per-instruction** (new) | 5.4+, LuaJIT 2.1 | Per bytecode instruction | Minimal |
 
 ---
 
@@ -79,7 +79,7 @@ complete working example in `e2e/e2e_branch_coverage.lua`.
 
 ---
 
-## Mode 2: Per-Instruction Coverage (Lua 5.4+ Only)
+## Mode 2: Per-Instruction Coverage (Lua 5.4+ and LuaJIT 2.1)
 
 This mode uses `cluacov.pchook` to count every bytecode instruction, giving
 true per-PC branch coverage. No filtering is needed — `if a or b or c` shows
@@ -92,7 +92,16 @@ The easiest way is to use `cluacov.runner`, which handles everything:
 ```sh
 # Run your program with the runner preloaded
 lua -lcluacov.runner your_program.lua
+# Or with LuaJIT 2.1
+luajit -lcluacov.runner your_program.lua
 ```
+
+On LuaJIT, collection pauses JIT compilation and flushes existing traces so
+that instruction hooks observe execution. Stopping collection restores the
+previous JIT state. The hook is shared by all coroutines; do not install
+another debug hook or call `jit.on()` during collection. LuaJIT suppresses
+hooks inside `__gc` finalizers and their callees, so those executions are not
+counted. See [LuaJIT support](branch-coverage.md) for the full limitations.
 
 That's it. When your program exits, `cluacov.runner` automatically writes:
 
@@ -239,14 +248,14 @@ require("test_suite")
 
 ## Troubleshooting
 
-### "pchook requires PUC-Rio Lua 5.4 or later"
+### "pchook requires PUC-Rio Lua 5.4+ or LuaJIT 2.1"
 
-You're running Lua 5.1–5.3 or LuaJIT. Use Mode 1 (line-level) instead, or
-upgrade to Lua 5.4+.
+You're running PUC-Rio Lua 5.1–5.3. Use Mode 1 (line-level) instead, or
+upgrade to Lua 5.4+ or LuaJIT 2.1.
 
 ### No branch data in LCOV report
 
-Make sure you're using Lua 5.4+ and the runner is preloaded (`-lcluacov.runner`)
+Make sure you're using Lua 5.4+ or LuaJIT 2.1 and the runner is preloaded (`-lcluacov.runner`)
 or `cluacov.runner` is required before your code runs.
 
 ### Coverage shows 0% for some files
@@ -256,11 +265,11 @@ Check your `.luacov` `include`/`exclude` patterns. The default excludes
 
 ### Slow test execution
 
-Per-instruction hooks fire on every VM instruction. Each invocation is cheaper
-than the cluacov C line hook (no `lua_getstack` call), so overall overhead is
-comparable and often lower — see [benchmark](benchmark.md). Both modes add
-significant overhead vs no hook; for local iteration you may prefer to run
-without coverage and only enable it for CI.
+Per-instruction hooks record instruction and edge counts throughout execution.
+LuaJIT also runs with JIT compilation paused during collection. Measure the
+overhead on your workload; the [benchmark](benchmark.md) contains historical
+measurements, not a guarantee for the current collector. For local iteration
+you may prefer to run without coverage and only enable it for CI.
 
 ### `get_hits` returns empty data
 

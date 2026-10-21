@@ -5,8 +5,8 @@ local is_windows = package.config:sub(1, 1) == "\\"
 describe("cluacov.runner", function()
    local lua_version = tonumber(_VERSION:match("(%d+%.%d+)"))
 
-   if jit or lua_version < 5.4 then
-      pending("runner requires PUC-Rio Lua 5.4+")
+   if not jit and lua_version < 5.4 then
+      pending("runner requires PUC-Rio Lua 5.4+ or LuaJIT 2.1")
    else
       local tmpdir
       local sample_file

@@ -15,6 +15,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PREAMBLE = """
+local load = loadstring or load
 local pchook = require('cluacov.pchook')
 local branchcov = require('cluacov.branchcov')
 """
@@ -126,6 +127,14 @@ return M
 """
 
 RUNNER_CASES = [
+    (
+        "preloaded_table_literal_functions",
+        "LCOV distinguishes preloaded same-line functions with different table literals",
+        "local M={}; function M.first(x) local t={value=1, [true]='yes', 10, 20}; if x then return t.value end end; function M.second(x) local t={value=2, [true]='yes', 10, 20}; if x then return t.value end end; return M\n",
+        "local m=require('sample'); require('cluacov.runner'); assert(m.first(true)==1)",
+        "",
+        "FNDA:1,first\nFNDA:0,second\nFNH:1\n",
+    ),
     (
         "ambiguous_preloaded_functions",
         "LCOV warns rather than assigning preloaded identical functions to arbitrary declarations",
@@ -241,23 +250,23 @@ def run_lua(lua, env, directory, code):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--lua", default="lua", help="Lua executable (5.4 or 5.5)")
+    parser.add_argument("--lua", default="lua", help="Lua executable (5.4, 5.5, or LuaJIT 2.1)")
     parser.add_argument("--module-dir", type=Path, help="Override compiled module directory (e.g. sanitizer build)")
     parser.add_argument("--preload", help="LD_PRELOAD for Lua children, without instrumenting the Python driver")
     parser.add_argument("--case", help="Run just one case by its identifier")
     args = parser.parse_args()
     version = subprocess.check_output(
-        [args.lua, "-e", "io.write(_VERSION:match('%d+%.%d+'))"], text=True,
+        [args.lua, "-e", "io.write(jit and 'luajit' or _VERSION:match('%d+%.%d+'))"], text=True,
     )
-    if version not in ("5.4", "5.5"):
-        parser.error("these counterexamples require Lua 5.4 or 5.5")
+    if version not in ("5.4", "5.5", "luajit"):
+        parser.error("these contracts require Lua 5.4, 5.5, or LuaJIT 2.1")
 
     # Absolute paths also work in subprocesses whose cwd is a fixture directory.
     env = os.environ.copy()
     if args.preload:
         env["LD_PRELOAD"] = args.preload
     env["LUA_PATH"] = str(ROOT / "src/?.lua") + ";" + env.get("LUA_PATH", ";;")
-    native = (args.module_dir or ROOT / "lib/lua" / version).resolve()
+    native = (args.module_dir or ROOT / "lib/lua" / ("5.1" if version == "luajit" else version)).resolve()
     env["LUA_CPATH"] = (
         str(native / "?.so") + ";" + str(native / "?.dll") + ";"
         + env.get("LUA_CPATH", ";;")

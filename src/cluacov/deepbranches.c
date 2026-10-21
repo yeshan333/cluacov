@@ -37,16 +37,7 @@
 #define get_string_value(o)  getstr((TString *)(val_(o).gc))
 #endif
 #else /* LuaJIT */
-#include "luajit.h"
-#if LUAJIT_VERSION_NUM == 20199
-#include "lj2/lua_assert.h"
-#include "lj2/lj_obj.h"
-#elif LUAJIT_VERSION_NUM == 20100
-#include "luajit-2.1.0-beta3/lua_assert.h"
-#include "luajit-2.1.0-beta3/lj_obj.h"
-#else
-#error unsupported LuaJIT version
-#endif
+#include "ljproto.h"
 #endif
 
 #ifdef PUCRIOLUA
@@ -462,6 +453,8 @@ static void add_branches(lua_State *L, Proto *proto, int result_index, int *coun
 
 #else /* LuaJIT */
 
+#include "ljbranches.h"
+
 static GCproto *get_proto(lua_State *L) {
     return funcproto(funcV(L->base));
 }
@@ -479,16 +472,24 @@ static int l_deepbranches(lua_State *L) {
     lua_newtable(L);
     result_index = lua_absindex(L, -1);
 
-#ifdef PUCRIOLUA
-    add_branches(L, get_proto(L), result_index, &count, "0");
-#else
-    (void) get_proto(L);
+#ifndef PUCRIOLUA
+    /* Restore original branch operands overwritten by compiled trace IDs. */
+    if (proto_has_trace(get_proto(L))) {
+        if (G(L)->hookmask & HOOK_GC)
+            return luaL_error(L, "cannot analyze traced LuaJIT functions inside __gc; "
+                              "analyze before finalization");
+        luaJIT_setmode(L, 1, LUAJIT_MODE_ALLFUNC | LUAJIT_MODE_FLUSH);
+    }
 #endif
+    add_branches(L, get_proto(L), result_index, &count, "0");
 
     return 1;
 }
 
 int luaopen_cluacov_deepbranches(lua_State *L) {
+#ifndef PUCRIOLUA
+    check_luajit_layout(L);
+#endif
     lua_newtable(L);
     lua_pushliteral(L, "1.0.0");
     lua_setfield(L, -2, "version");

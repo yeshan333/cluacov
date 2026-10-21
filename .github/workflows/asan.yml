@@ -11,16 +11,19 @@ on:
 # catch use-after-free, OOB reads/writes, UB, and leaks in the C
 # extensions (pchook.c, hook.c, deepbranches.c, deepactivelines.c).
 #
-# Lua 5.5 only — same C code is exercised on 5.4, so a single-version
-# guard is enough for the regression signal we want.
+# Lua 5.5 and LuaJIT exercise both VM adapters.
 #
 # This workflow mirrors `mise.toml`'s `asan:55` task. If you change the
 # sanitizer flags / suppressions / canary / ASAN_OPTIONS in mise.toml,
 # update this workflow too.
 
 jobs:
-  asan-lua-5_5:
-    name: ASan + UBSan + LSan (Lua 5.5)
+  asan:
+    strategy:
+      fail-fast: false
+      matrix:
+        luaVersion: ["5.5", "luajit"]
+    name: ASan + UBSan + LSan (${{ matrix.luaVersion }})
     runs-on: ubuntu-latest
 
     steps:
@@ -35,7 +38,7 @@ jobs:
 
     - uses: luarocks/gh-actions-lua@master
       with:
-        luaVersion: "5.5"
+        luaVersion: ${{ matrix.luaVersion }}
 
     - uses: luarocks/gh-actions-luarocks@master
       with:
