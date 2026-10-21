@@ -58,10 +58,12 @@ static int run(lua_State *L) {
         lua_close(S);
         return lua_error(L);
     }
+    lua_pushboolean(L, lua_toboolean(S, -1));
     finalized = 0;
     lua_close(S);
     lua_pushinteger(L, finalized);
-    return 1;
+    lua_insert(L, -2);
+    return 2;
 }
 
 int luaopen_suspended_main(lua_State *L) {
@@ -73,13 +75,16 @@ chunk = r'''local pchook = assert(package.loadlib(..., "luaopen_cluacov_pchook")
 -- A Lua finalizer: Lua 5.4 only checks the suspended status while executing Lua code.
 local anchor = setmetatable({}, { __gc = function() mark() end })
 coroutine.wrap(pchook.start)()
-coroutine.yield()
+-- Report whether the suspended main thread keeps cluacov's hook.
+coroutine.yield(debug.gethook() ~= nil)
 '''
 check = r'''local helper, chunk = arg[1], arg[2]
 local pchook = assert(package.searchpath("cluacov.pchook", package.cpath))
 local run = assert(package.loadlib(helper, "luaopen_suspended_main"))()
-local finalized = run(chunk, pchook)
+local finalized, hooked = run(chunk, pchook)
 assert(finalized == 1, "finalizers ran: " .. finalized .. ", want 1")
+-- Only Lua 5.4 aborts finalizers, so only there the main thread stays unhooked.
+assert(hooked == (_VERSION ~= "Lua 5.4"), "main thread hooked: " .. tostring(hooked))
 '''
 (out / "host.c").write_text(host)
 (out / "chunk.lua").write_text(chunk)
